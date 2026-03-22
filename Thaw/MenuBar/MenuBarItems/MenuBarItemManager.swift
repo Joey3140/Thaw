@@ -153,11 +153,6 @@ final class MenuBarItemManager: ObservableObject {
     /// subsequent performSetup() call can cancel the previous settling period
     /// before starting a new one, preventing multiple concurrent settling tasks.
     private var startupSettlingTask: Task<Void, Never>?
-    /// Absolute deadline for the current startup settling period. Stored so
-    /// that a re-entry of performSetup() (e.g. permission re-grant) can
-    /// preserve any remaining time from the original period rather than
-    /// resetting to a shorter delay based on current systemUptime.
-    private var settlingDeadline: ContinuousClock.Instant?
     /// Persisted bundle identifiers explicitly placed in hidden section.
     private var pinnedHiddenBundleIDs = Set<String>()
     /// Persisted bundle identifiers explicitly placed in always-hidden section.
@@ -358,47 +353,16 @@ final class MenuBarItemManager: ObservableObject {
         await cacheItemsRegardless()
         MenuBarItemManager.diagLog.debug("performSetup: initial cache complete, items in cache: visible=\(itemCache[.visible].count), hidden=\(itemCache[.hidden].count), alwaysHidden=\(itemCache[.alwaysHidden].count), managedItems=\(itemCache.managedItems.count)")
         configureCancellables(with: appState)
-        // Suppress restore and section-order saves for a settling period after launch.
-        // During login (system uptime < 60 s) many apps load over ~30 s, each triggering
-        // a cache cycle; without this guard every launch notification causes a restore
-        // that conflicts with the next, producing the "icon parade" effect.
-        // After the settling period ends, one final cacheItemsRegardless() enforces the
-        // user's saved layout against whatever macOS placed items.
-        //
-        // On re-entry (e.g. a permission re-grant during the login window): take the
-        // MAX of the previous deadline and the newly computed one. This prevents a
-        // second performSetup() call from resetting systemUptime to a higher value
-        // (> 60 s) and silently truncating the 30-second login settling window.
-        let preferredDelay: Duration = ProcessInfo.processInfo.systemUptime < 60 ? .seconds(30) : .seconds(5)
-        let newDeadline = ContinuousClock.now.advanced(by: preferredDelay)
-        let deadline = max(settlingDeadline ?? newDeadline, newDeadline)
-        settlingDeadline = deadline
-        // Cancel any in-flight settling task before starting a new one.
-        // Prevents multiple concurrent settling tasks if performSetup() is called
-        // again. The cancelled task exits without touching shared state; this call
-        // manages isInStartupSettling for the new period.
+        // Brief settling period allows AppLifecycleTracker to observe initial app states.
+        // Per-app deferral in cacheItemsRegardless() handles the actual coordination.
         startupSettlingTask?.cancel()
         isInStartupSettling = true
-        MenuBarItemManager.diagLog.debug("performSetup: startup settling period started (delay: \(preferredDelay))")
-        // @MainActor ensures the flag flip and final cache call are never
-        // interleaved with notification-triggered cache cycles between them.
+        MenuBarItemManager.diagLog.debug("performSetup: startup settling period started (2s)")
         startupSettlingTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await Task.sleep(until: deadline, clock: .continuous)
-            } catch {
-                // Cancelled by a subsequent performSetup() call; exit without
-                // touching shared state — the new call manages isInStartupSettling.
-                MenuBarItemManager.diagLog.debug("performSetup: startup settling task cancelled")
-                return
-            }
-            isInStartupSettling = false
-            settlingDeadline = nil
-            MenuBarItemManager.diagLog.debug("performSetup: startup settling period ended, running restore")
-            // skipRecentMoveCheck: true — relocateNewLeftmostItems/relocatePendingItems
-            // may have stamped lastMoveOperationTimestamp during settling; without this
-            // flag the final restore would be silently skipped by the 5 s cooldown.
-            await cacheItemsRegardless(skipRecentMoveCheck: true)
+            try? await Task.sleep(for: .seconds(2))
+            self?.isInStartupSettling = false
+            MenuBarItemManager.diagLog.debug("performSetup: startup settling ended, running restore")
+            await self?.cacheItemsRegardless(skipRecentMoveCheck: true)
         }
         MenuBarItemManager.diagLog.debug("performSetup: MenuBarItemManager setup complete")
     }
@@ -992,13 +956,13 @@ extension MenuBarItemManager {
                 return
             }
 
-            // Skip all restore logic during the startup settling period.
+            // Defer restore during startup settling or when apps are still transitioning.
             // The settling period prevents cascading icon moves when many apps
             // load at login or restart in quick succession (app update checks).
-            // A final cacheItemsRegardless() after the period ends handles restore.
-            guard !isInStartupSettling else {
+            guard !isInStartupSettling, appLifecycleTracker.transitioningAppsCount == 0 else {
+                let reason = isInStartupSettling ? "startup settling" : "apps transitioning"
+                MenuBarItemManager.diagLog.debug("cacheItemsRegardless: deferring restore - \(reason)")
                 await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
-                MenuBarItemManager.diagLog.debug("cacheItemsRegardless: startup settling active, skipping restore")
                 return
             }
 
@@ -3717,7 +3681,6 @@ extension MenuBarItemManager {
         // and saveSectionOrder by an in-flight settling task.
         startupSettlingTask?.cancel()
         isInStartupSettling = false
-        settlingDeadline = nil
         isResettingLayout = true
         defer { isResettingLayout = false }
 

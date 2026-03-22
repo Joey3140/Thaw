@@ -256,6 +256,11 @@ final class AppLifecycleTracker {
         }
     }
 
+    /// Returns the count of apps currently in transitioning states.
+    var transitioningAppsCount: Int {
+        appStates.values.filter { $0.isTransitioning }.count
+    }
+
     /// Resets all tracked states.
     func reset() {
         appStates.removeAll()
