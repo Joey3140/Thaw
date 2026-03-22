@@ -143,10 +143,6 @@ final class MenuBarItemManager: ObservableObject {
     private var backgroundCacheContinuation: CheckedContinuation<Void, Never>?
     /// Suppresses image cache updates during layout reset to prevent stale cache during moves.
     var isResettingLayout = false
-    /// Suppresses saving section order during an active order-restore pass.
-    private var isRestoringItemOrder = false
-    /// Timestamp when isRestoringItemOrder was set (for timeout detection).
-    private var isRestoringItemOrderTimestamp: Date?
     /// True during the startup settling period, during which restore operations
     /// and section-order saves are suppressed. This prevents cascading icon moves
     /// when many apps launch at login (login item boot) or restart in quick succession
@@ -840,16 +836,8 @@ extension MenuBarItemManager {
 
         itemCache = context.cache
 
-        // Reset isRestoringItemOrder if it's been stuck for too long (10 seconds).
-        // This prevents stale flags from blocking saves after user manual moves.
-        if isRestoringItemOrder, let timestamp = isRestoringItemOrderTimestamp, Date().timeIntervalSince(timestamp) > 10 {
-            MenuBarItemManager.diagLog.debug("Resetting stale isRestoringItemOrder flag (timeout)")
-            isRestoringItemOrder = false
-            isRestoringItemOrderTimestamp = nil
-        }
-
         // Only save section order when positions are stable and we're not in a transition state.
-        if !isRestoringItemOrder, !isResettingLayout, !isInStartupSettling, positionConsensus.hasRecentConsensus {
+        if !isResettingLayout, !isInStartupSettling, positionConsensus.hasRecentConsensus {
             saveSectionOrder(from: context.cache)
         } else if !positionConsensus.hasRecentConsensus {
             MenuBarItemManager.diagLog.debug("Skipping section order save - positions not yet stable")
@@ -1033,10 +1021,6 @@ extension MenuBarItemManager {
 
             // Cross-section restore: move items back to their saved section
             // before restoreSavedItemOrder handles within-section reordering.
-            // Set the flag before calling so that any intermediate cache
-            // updates during move() don't overwrite the saved section order.
-            isRestoringItemOrder = true
-            isRestoringItemOrderTimestamp = Date()
             let didRestoreSections = await restoreItemsToSavedSections(
                 items,
                 controlItems: controlItems,
@@ -1049,17 +1033,12 @@ extension MenuBarItemManager {
                 Task { [weak self] in
                     try? await Task.sleep(for: MenuBarItemManager.uiSettleDelay)
                     await self?.cacheItemsRegardless(skipRecentMoveCheck: true)
-                    self?.isRestoringItemOrder = false
                     continuation?.resume()
                     try? await Task.sleep(for: MenuBarItemManager.uiSettleDelay)
                     await self?.cacheItemsIfNeeded()
                 }
                 return
             }
-            // Note: isRestoringItemOrder remains true here so that if a concurrent
-            // cache call occurs (e.g., from app launch notification), it won't
-            // prematurely reset the flag and allow saveSectionOrder to run while
-            // we're still in the cooldown period from previous moves.
 
             let didRestoreOrder = await restoreSavedItemOrder(
                 items,
@@ -1068,17 +1047,12 @@ extension MenuBarItemManager {
             )
 
             if didRestoreOrder {
-                // Keep isRestoringItemOrder true through the recache to prevent
-                // saving intermediate item positions while macOS settles the moves.
-                isRestoringItemOrder = true
-                isRestoringItemOrderTimestamp = Date()
                 MenuBarItemManager.diagLog.debug("Restored saved item order; scheduling recache")
                 let continuation = self.backgroundCacheContinuation
                 self.backgroundCacheContinuation = nil
                 Task { [weak self] in
                     try? await Task.sleep(for: MenuBarItemManager.uiSettleDelay)
                     await self?.cacheItemsRegardless(skipRecentMoveCheck: true)
-                    self?.isRestoringItemOrder = false
                     continuation?.resume()
                     // Pick up items that appeared during the lock period
                     // (e.g. a second app launching concurrently).
@@ -1089,11 +1063,6 @@ extension MenuBarItemManager {
             }
 
             await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
-
-            // Reset the flag since no restore happened in this cache cycle.
-            // This must be done before the function ends so that saveSectionOrder
-            // can run for future caches.
-            isRestoringItemOrder = false
 
             MenuBarItemManager.diagLog.debug("cacheItemsRegardless: finished, cache now has \(self.itemCache.managedItems.count) managed items")
         }
@@ -3423,8 +3392,11 @@ extension MenuBarItemManager {
     ) async -> Bool {
         guard !savedSectionOrder.isEmpty else { return false }
 
-        // Don't attempt another restore while a previous restore's recache is in flight.
-        guard !isRestoringItemOrder else { return false }
+        // Wait for position stability before attempting restore.
+        guard !positionConsensus.shouldWaitForStability else {
+            MenuBarItemManager.diagLog.debug("restoreSavedItemOrder: deferring - positions not yet stable")
+            return false
+        }
 
         // Don't restore while suppressing relocations (first launch / reset).
         guard !suppressNextNewLeftmostItemRelocation else { return false }
