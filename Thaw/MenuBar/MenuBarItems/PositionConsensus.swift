@@ -49,6 +49,9 @@ final class PositionConsensus {
     /// Maximum time between observations to be considered part of the same sequence.
     private let observationWindow: TimeInterval = 2.0
 
+    /// Maximum time to wait for consensus before proceeding with best-effort.
+    private let maxWaitTime: TimeInterval = 10.0
+
     /// Recent observations, oldest first.
     private var observations: [PositionSnapshot] = []
 
@@ -58,6 +61,9 @@ final class PositionConsensus {
     /// The last consensus snapshot that was achieved.
     private(set) var lastConsensus: PositionSnapshot?
 
+    /// When we first started observing (for timeout detection).
+    private var firstObservationTime: Date?
+
     private let diagLog = DiagLog(category: "PositionConsensus")
 
     /// Records a new position observation.
@@ -66,6 +72,11 @@ final class PositionConsensus {
     /// - Returns: True if consensus has been achieved (positions are stable)
     func observe(items: [MenuBarItem]) -> Bool {
         let snapshot = PositionSnapshot(items: items)
+
+        // Track when we first started observing (for timeout)
+        if firstObservationTime == nil {
+            firstObservationTime = Date()
+        }
 
         // Remove observations that are too old
         let cutoff = Date().addingTimeInterval(-observationWindow)
@@ -92,6 +103,7 @@ final class PositionConsensus {
         if allMatch {
             lastConsensus = first
             lastConsensusTime = Date()
+            firstObservationTime = nil // Reset timeout tracking
             diagLog.debug("Position consensus achieved with \(observations.count) observations")
             return true
         } else {
@@ -114,7 +126,23 @@ final class PositionConsensus {
 
     /// Returns true if we should wait for more observations before acting.
     var shouldWaitForStability: Bool {
-        observations.count < requiredObservations || !hasRecentConsensus
+        // Require minimum observations for confidence
+        guard observations.count >= 2 else { return true }
+
+        // If we have 3+ observations and consensus, we're stable
+        if observations.count >= requiredObservations && hasRecentConsensus {
+            return false
+        }
+
+        // Check timeout - proceed with best-effort after 10s
+        if let firstTime = firstObservationTime,
+           Date().timeIntervalSince(firstTime) > maxWaitTime
+        {
+            diagLog.debug("PositionConsensus timeout reached - proceeding with \(observations.count) observations")
+            return false
+        }
+
+        return true
     }
 
     /// Returns the identifiers of items that have changed since last consensus.
@@ -162,6 +190,7 @@ final class PositionConsensus {
         observations.removeAll()
         lastConsensus = nil
         lastConsensusTime = nil
+        firstObservationTime = nil
         diagLog.info("Reset position consensus")
     }
 

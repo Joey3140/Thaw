@@ -30,6 +30,15 @@ final class InstanceTracker {
     /// Timestamp when we first saw items from each app.
     private var firstSeen: [String: Date] = [:]
 
+    /// Set of apps that have been successfully learned (stable patterns).
+    private var hasLearnedPatterns: Set<String> = []
+
+    /// Whether pattern learning is currently enabled.
+    private(set) var isLearningEnabled: Bool = false
+
+    /// Apps seen before learning was enabled - don't learn these until next launch.
+    private var deferredApps: Set<String> = []
+
     private let diagLog = DiagLog(category: "InstanceTracker")
 
     init() {
@@ -67,6 +76,17 @@ final class InstanceTracker {
         var result: [CGWindowID: Int] = [:]
 
         for (bundleID, appItems) in itemsByBundleID where appItems.count > 1 {
+            // Skip learning if disabled or app was seen before learning enabled
+            guard isLearningEnabled else {
+                deferredApps.insert(bundleID)
+                diagLog.debug("InstanceTracker: deferring learning for \(bundleID) - learning disabled")
+                continue
+            }
+            guard !deferredApps.contains(bundleID) else {
+                diagLog.debug("InstanceTracker: skipping \(bundleID) - seen before learning enabled")
+                continue
+            }
+
             // Sort by current instance index (from MenuBarItemTag) for stability.
             // When indices are equal, sort by title for deterministic initial assignment.
             let sortedItems = appItems.sorted {
@@ -120,6 +140,12 @@ final class InstanceTracker {
                 usedIndices.insert(nextIndex)
                 knownPatterns[item.tag.title] = nextIndex
                 diagLog.debug("Assigned new instance index \(nextIndex) to \(bundleID): '\(item.tag.title)'")
+            }
+
+            // Mark app as learned if this is the first time
+            if !hasLearnedPatterns.contains(bundleID) {
+                hasLearnedPatterns.insert(bundleID)
+                diagLog.info("InstanceTracker: learned patterns for \(bundleID)")
             }
 
             // Persist updated patterns
@@ -201,8 +227,24 @@ final class InstanceTracker {
         knownInstances.removeAll()
         pendingApps.removeAll()
         firstSeen.removeAll()
+        hasLearnedPatterns.removeAll()
+        deferredApps.removeAll()
+        isLearningEnabled = false
         persistKnownInstances()
-        diagLog.info("Reset all instance mappings")
+        diagLog.info("Reset all instance mappings and learning state")
+    }
+
+    /// Enables pattern learning after startup settling is complete.
+    func enableLearning() {
+        isLearningEnabled = true
+        diagLog.info("InstanceTracker: learning enabled")
+        // Clear deferred apps - next cache will be first chance to learn them
+        deferredApps.removeAll()
+    }
+
+    /// Checks if an app has been learned yet.
+    func hasLearned(_ bundleID: String) -> Bool {
+        hasLearnedPatterns.contains(bundleID)
     }
 
     /// Removes mappings for apps that are no longer running.

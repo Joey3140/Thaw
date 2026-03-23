@@ -281,11 +281,23 @@ final class MenuBarItemManager: ObservableObject {
             }
         }
 
+        // Build set of temporarily shown item identifiers to exclude from save
+        let temporarilyShownIdentifiers = Set(temporarilyShownItemContexts.map { $0.tag.tagIdentifier })
+
         for section in MenuBarSection.Name.allCases {
             // Start with current identifiers for this section (only primary items)
+            // Skip items that are temporarily shown from IceBar
             var identifiers = cache[section]
-                .filter { !$0.isControlItem && $0.tag.instanceIndex == 0 }
+                .filter { !$0.isControlItem && $0.tag.instanceIndex == 0 && !temporarilyShownIdentifiers.contains($0.tag.tagIdentifier) }
                 .map(\.uniqueIdentifier)
+
+            // Log if we skipped any temporarily shown items
+            let skippedCount = cache[section].filter {
+                temporarilyShownIdentifiers.contains($0.tag.tagIdentifier)
+            }.count
+            if skippedCount > 0 {
+                MenuBarItemManager.diagLog.debug("saveSectionOrder: skipped \(skippedCount) temporarily shown items in \(section)")
+            }
 
             // Add identifiers from saved sections that are NOT currently in the cache
             // (i.e., apps that are closed - preserve their saved section).
@@ -362,6 +374,11 @@ final class MenuBarItemManager: ObservableObject {
             try? await Task.sleep(for: .seconds(2))
             self?.isInStartupSettling = false
             MenuBarItemManager.diagLog.debug("performSetup: startup settling ended, running restore")
+
+            // Enable InstanceTracker learning after startup settling
+            self?.instanceTracker.enableLearning()
+            MenuBarItemManager.diagLog.debug("InstanceTracker: learning enabled after startup settling")
+
             await self?.cacheItemsRegardless(skipRecentMoveCheck: true)
         }
         MenuBarItemManager.diagLog.debug("performSetup: MenuBarItemManager setup complete")
