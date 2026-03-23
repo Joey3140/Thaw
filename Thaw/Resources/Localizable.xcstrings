@@ -6566,7 +6566,7 @@
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Klikněte na ikonu"
+            "value" : "Kliknout na ikonu"
           }
         },
         "de" : {
@@ -9074,7 +9074,7 @@
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dynamická"
+            "value" : "Dynamicky"
           }
         },
         "de" : {
@@ -10082,7 +10082,7 @@
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Popředí"
+            "value" : "Přepnutí aplikace"
           }
         },
         "de" : {
@@ -10184,7 +10184,7 @@
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Plný"
+            "value" : "Vcelku"
           }
         },
         "de" : {
@@ -23701,7 +23701,7 @@
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Přepínat nabídky aplikace"
+            "value" : "Zobrazit/skrýt okno aplikace"
           }
         },
         "de" : {
