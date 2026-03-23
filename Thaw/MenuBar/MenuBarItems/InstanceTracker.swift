@@ -39,6 +39,44 @@ final class InstanceTracker {
     /// Apps seen before learning was enabled - don't learn these until next launch.
     private var deferredApps: Set<String> = []
 
+    // MARK: - Pattern Observation Tracking
+
+    /// Represents a single pattern observation at a point in time.
+    private struct PatternObservation {
+        let timestamp: Date
+        let patterns: [String: Int] // titlePattern: instanceIndex
+    }
+
+    /// Tracks pattern observations per app for consistency verification.
+    /// [bundleID: [observations]]
+    private var patternObservations: [String: [PatternObservation]] = [:]
+
+    /// Tracks observation attempt counts per app (for fallback cap).
+    /// [bundleID: attemptCount]
+    private var observationAttemptCounts: [String: Int] = [:]
+
+    /// Tracks last time we checked observations for each app.
+    /// [bundleID: lastCheckTime]
+    private var lastObservationCheck: [String: Date] = [:]
+
+    /// Timer for frequent observation checking during settling.
+    private var observationTimer: Timer?
+
+    /// Whether we're currently in the settling period.
+    private var isSettlingPeriod: Bool = false
+
+    /// Minimum consistent observations required before persisting patterns.
+    private let requiredConsistentObservations = 3
+
+    /// Time window for observations to be considered part of the same sequence.
+    private let observationWindow: TimeInterval = 5.0
+
+    /// Maximum observation attempts before falling back to windowID order.
+    private let maxObservationAttempts = 5
+
+    /// Interval for observation timer checks.
+    private let observationCheckInterval: TimeInterval = 0.5
+
     private let diagLog = DiagLog(category: "InstanceTracker")
 
     init() {
@@ -79,16 +117,78 @@ final class InstanceTracker {
             // Skip learning if disabled or app was seen before learning enabled
             guard isLearningEnabled else {
                 deferredApps.insert(bundleID)
-                diagLog.debug("InstanceTracker: deferring learning for \(bundleID) - learning disabled")
-                continue
-            }
-            guard !deferredApps.contains(bundleID) else {
-                diagLog.debug("InstanceTracker: skipping \(bundleID) - seen before learning enabled")
+                diagLog.debug("[InstanceTracker] \(bundleID): DEFERRED - learning disabled")
+
+                // Assign based on windowID order (no persistence)
+                for (index, item) in appItems.sorted(by: { $0.windowID < $1.windowID }).enumerated() {
+                    result[item.windowID] = index
+                }
                 continue
             }
 
-            // Sort by current instance index (from MenuBarItemTag) for stability.
-            // When indices are equal, sort by title for deterministic initial assignment.
+            guard !deferredApps.contains(bundleID) else {
+                diagLog.debug("[InstanceTracker] \(bundleID): SKIPPED - seen before learning enabled")
+
+                // Assign based on windowID order (no persistence)
+                for (index, item) in appItems.sorted(by: { $0.windowID < $1.windowID }).enumerated() {
+                    result[item.windowID] = index
+                }
+                continue
+            }
+
+            // Check if we already have known patterns for this app
+            if let knownPatterns = knownInstances[bundleID], !knownPatterns.isEmpty {
+                // Use known patterns
+                var usedIndices = Set<Int>()
+
+                // Sort for stable assignment
+                let sortedItems = appItems.sorted {
+                    if $0.tag.instanceIndex == $1.tag.instanceIndex {
+                        return $0.tag.title < $1.tag.title
+                    }
+                    return $0.tag.instanceIndex < $1.tag.instanceIndex
+                }
+
+                // Match items to known patterns
+                for item in sortedItems {
+                    let title = item.tag.title
+
+                    // Try exact match first
+                    if let index = knownPatterns[title], !usedIndices.contains(index) {
+                        result[item.windowID] = index
+                        usedIndices.insert(index)
+                        continue
+                    }
+
+                    // Try pattern matching for dynamic titles
+                    if let (pattern, index) = matchToKnownPattern(title: title, patterns: knownPatterns),
+                       !usedIndices.contains(index)
+                    {
+                        result[item.windowID] = index
+                        usedIndices.insert(index)
+                        diagLog.debug("[InstanceTracker] \(bundleID): Matched pattern '\(title)' -> index \(index) (from '\(pattern)'")
+                        continue
+                    }
+                }
+
+                // Assign remaining indices
+                var nextIndex = 0
+                for item in sortedItems {
+                    guard result[item.windowID] == nil else { continue }
+                    while usedIndices.contains(nextIndex) {
+                        nextIndex += 1
+                    }
+                    result[item.windowID] = nextIndex
+                    usedIndices.insert(nextIndex)
+                    diagLog.debug("[InstanceTracker] \(bundleID): Assigned index \(nextIndex) to new item '\(item.tag.title)'")
+                }
+
+                diagLog.debug("[InstanceTracker] \(bundleID): Using known patterns")
+                continue
+            }
+
+            // NEW APP: Need to learn patterns through observation
+            // Sort by current instance index for stability
             let sortedItems = appItems.sorted {
                 if $0.tag.instanceIndex == $1.tag.instanceIndex {
                     return $0.tag.title < $1.tag.title
@@ -96,62 +196,59 @@ final class InstanceTracker {
                 return $0.tag.instanceIndex < $1.tag.instanceIndex
             }
 
-            // Check if we have known patterns for this app
-            var knownPatterns = knownInstances[bundleID, default: [:]]
-            var usedIndices = Set<Int>()
+            // Build current pattern observation
+            let currentPatterns = buildPatterns(from: sortedItems)
+            let observation = PatternObservation(timestamp: Date(), patterns: currentPatterns)
 
-            // First pass: match items to known patterns
-            for item in sortedItems {
-                let title = item.tag.title
+            // Store observation
+            var observations = patternObservations[bundleID, default: []]
+            observations.append(observation)
 
-                // Try exact match first
-                if let index = knownPatterns[title], !usedIndices.contains(index) {
-                    result[item.windowID] = index
-                    usedIndices.insert(index)
-                    continue
-                }
+            // Clean old observations (>5s)
+            let cutoff = Date().addingTimeInterval(-observationWindow)
+            observations.removeAll { $0.timestamp < cutoff }
+            patternObservations[bundleID] = observations
 
-                // Try pattern matching for dynamic titles
-                if let (pattern, index) = matchToKnownPattern(title: title, patterns: knownPatterns),
-                   !usedIndices.contains(index)
-                {
-                    result[item.windowID] = index
-                    usedIndices.insert(index)
-                    // Update pattern if it evolved
-                    if pattern != title {
-                        knownPatterns[title] = index
-                        diagLog.debug("Updated pattern for \(bundleID)[\(index)]: '\(pattern)' → '\(title)'")
-                    }
-                    continue
-                }
-            }
+            // Increment attempt count
+            let attempts = observationAttemptCounts[bundleID, default: 0] + 1
+            observationAttemptCounts[bundleID] = attempts
 
-            // Second pass: assign new indices to unmatched items
-            var nextIndex = 0
-            for item in sortedItems {
-                guard result[item.windowID] == nil else { continue }
+            diagLog.debug("[InstanceTracker] \(bundleID): OBSERVED pattern (attempt \(attempts)/\(maxObservationAttempts))")
 
-                // Find next available index
-                while usedIndices.contains(nextIndex) {
-                    nextIndex += 1
-                }
+            // Check for consistency
+            let isConsistent = arePatternsConsistent(observations)
+            let shouldFallback = attempts >= maxObservationAttempts
 
-                result[item.windowID] = nextIndex
-                usedIndices.insert(nextIndex)
-                knownPatterns[item.tag.title] = nextIndex
-                diagLog.debug("Assigned new instance index \(nextIndex) to \(bundleID): '\(item.tag.title)'")
-            }
-
-            // Mark app as learned if this is the first time
-            if !hasLearnedPatterns.contains(bundleID) {
+            if isConsistent {
+                // PERSIST: Patterns are stable
+                persistPatterns(bundleID: bundleID, patterns: currentPatterns)
                 hasLearnedPatterns.insert(bundleID)
-                diagLog.info("InstanceTracker: learned patterns for \(bundleID)")
-            }
+                observationAttemptCounts[bundleID] = 0 // Reset attempts
+                diagLog.info("[InstanceTracker] \(bundleID): PERSISTED after \(observations.count) consistent observations")
 
-            // Persist updated patterns
-            if knownPatterns != knownInstances[bundleID] {
-                knownInstances[bundleID] = knownPatterns
-                persistKnownInstances()
+                // Apply to result
+                for item in sortedItems {
+                    if let index = currentPatterns[item.tag.title] {
+                        result[item.windowID] = index
+                    }
+                }
+            } else if shouldFallback {
+                // FALLBACK: Max attempts reached, use windowID order
+                diagLog.warning("[InstanceTracker] \(bundleID): FALLBACK after \(attempts) attempts - using windowID order")
+                observationAttemptCounts[bundleID] = 0 // Reset for next time
+
+                // Assign based on current windowID order (no persistence)
+                for (index, item) in sortedItems.enumerated() {
+                    result[item.windowID] = index
+                }
+            } else {
+                // WAITING: Not consistent yet, use windowID order temporarily
+                diagLog.debug("[InstanceTracker] \(bundleID): WAITING - \(observations.count)/\(requiredConsistentObservations) consistent observations")
+
+                // Assign based on current windowID order (no persistence)
+                for (index, item) in sortedItems.enumerated() {
+                    result[item.windowID] = index
+                }
             }
         }
 
@@ -159,6 +256,12 @@ final class InstanceTracker {
         for (_, appItems) in itemsByBundleID where appItems.count == 1 {
             result[appItems[0].windowID] = 0
         }
+
+        // Log summary
+        let learnedCount = hasLearnedPatterns.count
+        let observingCount = patternObservations.keys.count
+        let deferredCount = deferredApps.count
+        diagLog.debug("[InstanceTracker] Summary: \(learnedCount) learned, \(observingCount) observing, \(deferredCount) deferred")
 
         return result
     }
@@ -221,6 +324,85 @@ final class InstanceTracker {
         return count
     }
 
+    // MARK: - Pattern Observation Timer
+
+    /// Starts the observation timer for frequent consistency checks during settling.
+    func startObservationTimer() {
+        guard observationTimer == nil else { return }
+        isSettlingPeriod = true
+        observationTimer = Timer.scheduledTimer(withTimeInterval: observationCheckInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkAllObservations()
+            }
+        }
+        diagLog.debug("[InstanceTracker] Observation timer started (500ms interval)")
+
+        // Auto-stop after 5 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            self?.stopObservationTimer()
+        }
+    }
+
+    /// Stops the observation timer.
+    func stopObservationTimer() {
+        observationTimer?.invalidate()
+        observationTimer = nil
+        isSettlingPeriod = false
+        diagLog.debug("[InstanceTracker] Observation timer stopped")
+    }
+
+    /// Checks all apps for pattern consistency (called by timer).
+    private func checkAllObservations() {
+        for (bundleID, observations) in patternObservations {
+            guard observations.count >= requiredConsistentObservations else { continue }
+
+            if arePatternsConsistent(observations) {
+                // Persist immediately when consistency detected
+                if let lastObservation = observations.last {
+                    persistPatterns(bundleID: bundleID, patterns: lastObservation.patterns)
+                    hasLearnedPatterns.insert(bundleID)
+                    diagLog.info("[InstanceTracker] \(bundleID): Early persist via timer after \(observations.count) observations")
+                }
+            }
+        }
+    }
+
+    /// Checks if the last N observations are consistent.
+    private func arePatternsConsistent(_ observations: [PatternObservation]) -> Bool {
+        guard observations.count >= requiredConsistentObservations else { return false }
+        let lastN = Array(observations.suffix(requiredConsistentObservations))
+        guard let firstObservation = lastN.first else { return false }
+        let firstPatterns = firstObservation.patterns
+        let isConsistent = lastN.allSatisfy { $0.patterns == firstPatterns }
+
+        if isConsistent {
+            diagLog.debug("[InstanceTracker] Patterns CONSISTENT across \(requiredConsistentObservations) observations")
+        }
+
+        return isConsistent
+    }
+
+    /// Builds a pattern dictionary from items.
+    /// Handles duplicate titles gracefully by using the first occurrence.
+    private func buildPatterns(from items: [MenuBarItem]) -> [String: Int] {
+        var patterns = [String: Int]()
+        for item in items {
+            let title = item.tag.title
+            if patterns[title] == nil {
+                patterns[title] = item.tag.instanceIndex
+            } else {
+                diagLog.warning("[InstanceTracker] Duplicate title '\(title)' encountered, using first occurrence")
+            }
+        }
+        return patterns
+    }
+
+    /// Persists patterns for an app.
+    private func persistPatterns(bundleID: String, patterns: [String: Int]) {
+        knownInstances[bundleID] = patterns
+        persistKnownInstances()
+    }
+
     /// Clears all tracked instance mappings.
     /// Called during layout reset.
     func reset() {
@@ -229,9 +411,13 @@ final class InstanceTracker {
         firstSeen.removeAll()
         hasLearnedPatterns.removeAll()
         deferredApps.removeAll()
+        patternObservations.removeAll()
+        observationAttemptCounts.removeAll()
+        lastObservationCheck.removeAll()
+        stopObservationTimer()
         isLearningEnabled = false
         persistKnownInstances()
-        diagLog.info("Reset all instance mappings and learning state")
+        diagLog.info("[InstanceTracker] Full reset completed")
     }
 
     /// Enables pattern learning after startup settling is complete.
@@ -252,10 +438,22 @@ final class InstanceTracker {
     /// - Parameter runningBundleIDs: Set of currently running app bundle IDs
     func prune(runningBundleIDs: Set<String>) {
         let beforeCount = knownInstances.count
+        let allBundleIDs = Set(knownInstances.keys)
         knownInstances = knownInstances.filter { runningBundleIDs.contains($0.key) }
+
+        // Also clear observation state for terminated apps
+        let removedBundleIDs = allBundleIDs.subtracting(runningBundleIDs)
+        for bundleID in removedBundleIDs {
+            observationAttemptCounts.removeValue(forKey: bundleID)
+            patternObservations.removeValue(forKey: bundleID)
+            lastObservationCheck.removeValue(forKey: bundleID)
+            hasLearnedPatterns.remove(bundleID)
+            diagLog.debug("[InstanceTracker] Cleared observation state for terminated app \(bundleID)")
+        }
+
         if knownInstances.count != beforeCount {
             persistKnownInstances()
-            diagLog.debug("Pruned instance mappings: \(beforeCount) → \(knownInstances.count)")
+            diagLog.debug("[InstanceTracker] Pruned instance mappings: \(beforeCount) → \(knownInstances.count)")
         }
     }
 }

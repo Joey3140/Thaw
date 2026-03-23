@@ -379,6 +379,9 @@ final class MenuBarItemManager: ObservableObject {
             self?.instanceTracker.enableLearning()
             MenuBarItemManager.diagLog.debug("InstanceTracker: learning enabled after startup settling")
 
+            // Start observation timer for frequent pattern consistency checks
+            self?.instanceTracker.startObservationTimer()
+
             await self?.cacheItemsRegardless(skipRecentMoveCheck: true)
         }
         MenuBarItemManager.diagLog.debug("performSetup: MenuBarItemManager setup complete")
@@ -975,6 +978,14 @@ extension MenuBarItemManager {
                     continuation?.resume()
                 }
                 return
+            }
+
+            // Restore primary items for multi-icon apps (fallback when InstanceTracker hasn't learned).
+            // This runs every cache cycle until InstanceTracker learns all multi-icon apps.
+            if await restorePrimaryItemsToSavedSections(items, controlItems: controlItems) {
+                MenuBarItemManager.diagLog.debug("Primary item restoration made moves; continuing to next cache cycle")
+                // Don't return early - let the cache cycle continue normally
+                // This allows InstanceTracker to learn patterns while we maintain correct sections
             }
 
             // Defer restore during startup settling or when apps are still transitioning.
@@ -3157,6 +3168,125 @@ extension MenuBarItemManager {
         return didRelocate
     }
 
+    // MARK: - Primary Item Restoration for Multi-Icon Apps
+
+    /// Restores only primary items (instanceIndex == 0) for multi-icon apps.
+    /// Provides fallback when InstanceTracker hasn't learned patterns yet.
+    /// Places items at section boundaries (simple, reliable).
+    ///
+    /// This runs every cache cycle until InstanceTracker learns all multi-icon apps.
+    ///
+    /// Returns `true` if any items were moved.
+    private func restorePrimaryItemsToSavedSections(
+        _ items: [MenuBarItem],
+        controlItems: ControlItemPair
+    ) async -> Bool {
+        MenuBarItemManager.diagLog.debug("[PrimaryRestore] Starting primary item restoration for multi-icon apps")
+
+        // Build lookup: baseIdentifier (namespace:title) -> saved section
+        var savedSectionForBaseID = [String: MenuBarSection.Name]()
+        for (sectionKeyString, identifiers) in savedSectionOrder {
+            guard let section = sectionName(for: sectionKeyString) else { continue }
+            for identifier in identifiers {
+                // Extract base identifier (namespace:title, without instanceIndex)
+                let baseID = identifier.split(separator: ":", maxSplits: 2).prefix(2).joined(separator: ":")
+                savedSectionForBaseID[baseID] = section
+            }
+        }
+
+        guard !savedSectionForBaseID.isEmpty else {
+            MenuBarItemManager.diagLog.debug("[PrimaryRestore] No saved sections to restore to")
+            return false
+        }
+
+        // Count items per namespace to identify multi-icon apps
+        var itemsPerNamespace = [String: Int]()
+        for item in items where !item.isControlItem && item.isMovable && item.canBeHidden {
+            let ns = item.tag.namespace.description
+            itemsPerNamespace[ns, default: 0] += 1
+        }
+
+        // Check if ALL multi-icon apps are already learned - if so, skip entirely
+        let multiIconBundleIDs = itemsPerNamespace.filter { $0.value > 1 }.keys
+        let allLearned = multiIconBundleIDs.allSatisfy { instanceTracker.hasLearned($0) }
+        if allLearned {
+            MenuBarItemManager.diagLog.debug("[PrimaryRestore] All multi-icon apps learned by InstanceTracker, skipping")
+            return false
+        }
+
+        var didMove = false
+        var context = CacheContext(
+            controlItems: controlItems,
+            displayID: Bridging.getActiveMenuBarDisplayID()
+        )
+
+        for item in items where !item.isControlItem && item.isMovable && item.canBeHidden {
+            // Only handle primary items (instanceIndex == 0)
+            guard item.tag.instanceIndex == 0 else { continue }
+
+            let bundleID = item.tag.namespace.description
+
+            // Only handle multi-icon apps
+            guard let itemCount = itemsPerNamespace[bundleID], itemCount > 1 else {
+                continue
+            }
+
+            // Skip if InstanceTracker already learned this app
+            if instanceTracker.hasLearned(bundleID) {
+                continue
+            }
+
+            let baseIdentifier = "\(item.tag.namespace):\(item.tag.title)"
+            guard let savedSection = savedSectionForBaseID[baseIdentifier] else {
+                continue
+            }
+
+            guard let currentSection = context.findSection(for: item) else { continue }
+
+            guard currentSection != savedSection else { continue }
+
+            // Place at section boundary (simple, reliable)
+            let destination: MoveDestination
+            switch savedSection {
+            case .visible:
+                // Place just left of hidden control item (rightmost in visible)
+                destination = .leftOfItem(controlItems.hidden)
+                MenuBarItemManager.diagLog.info("[PrimaryRestore] Moving \(item.logString) to visible section (leftOf hidden control)")
+
+            case .hidden:
+                // Place just right of hidden control item (leftmost in hidden)
+                destination = .rightOfItem(controlItems.hidden)
+                MenuBarItemManager.diagLog.info("[PrimaryRestore] Moving \(item.logString) to hidden section (rightOf hidden control)")
+
+            case .alwaysHidden:
+                // Place just right of alwaysHidden control item, or leftOf hidden if no alwaysHidden
+                if let alwaysHidden = controlItems.alwaysHidden {
+                    destination = .rightOfItem(alwaysHidden)
+                    MenuBarItemManager.diagLog.info("[PrimaryRestore] Moving \(item.logString) to alwaysHidden section (rightOf alwaysHidden control)")
+                } else {
+                    destination = .leftOfItem(controlItems.hidden)
+                    MenuBarItemManager.diagLog.info("[PrimaryRestore] Moving \(item.logString) to alwaysHidden section (leftOf hidden control, no alwaysHidden)")
+                }
+            }
+
+            do {
+                try await move(item: item, to: destination, skipInputPause: true)
+                didMove = true
+                MenuBarItemManager.diagLog.info("[PrimaryRestore] SUCCESS: Restored \(item.logString) to \(savedSection)")
+            } catch {
+                MenuBarItemManager.diagLog.error("[PrimaryRestore] FAILED: Could not restore \(item.logString): \(error)")
+            }
+        }
+
+        if didMove {
+            MenuBarItemManager.diagLog.debug("[PrimaryRestore] Completed with moves")
+        } else {
+            MenuBarItemManager.diagLog.debug("[PrimaryRestore] Completed, no moves needed")
+        }
+
+        return didMove
+    }
+
     /// Restores items to their saved sections when an app restarts and
     /// macOS places its items in a different section than where the user
     /// arranged them.
@@ -3421,11 +3551,12 @@ extension MenuBarItemManager {
             }
         }
 
-        // Skip if indexed or multi-icon apps are present. These naturally position
-        // themselves, and restoring order causes shuffling.
+        // For multi-icon apps, only restore primary items (instanceIndex == 0).
+        // Indexed items naturally position themselves next to their primary.
+        // Single-icon apps with indexed items are still skipped to avoid shuffling.
         let hasMultiIconApps = itemsPerNamespace.values.contains { $0 > 1 }
-        guard !hasIndexedItems && !hasMultiIconApps else {
-            MenuBarItemManager.diagLog.debug("restoreSavedItemOrder: skipping due to indexed/multi-icon items present")
+        if hasIndexedItems && !hasMultiIconApps {
+            MenuBarItemManager.diagLog.debug("restoreSavedItemOrder: skipping - single-icon app with indexed items")
             return false
         }
 
@@ -3507,6 +3638,14 @@ extension MenuBarItemManager {
                 // Skip items that are currently temporarily shown.
                 let tagString = item.tag.tagIdentifier
                 guard !activelyShownTags.contains(tagString) else { continue }
+
+                // Skip indexed items (instanceIndex > 0) in multi-icon apps.
+                // These naturally position themselves next to their primary item.
+                let ns = item.tag.namespace.description
+                if let count = itemsPerNamespace[ns], count > 1, item.tag.instanceIndex > 0 {
+                    MenuBarItemManager.diagLog.debug("restoreSavedItemOrder: Skipping indexed item \(item.logString) in multi-icon app")
+                    continue
+                }
 
                 do {
                     try await move(item: item, to: .leftOfItem(currentAnchor), skipInputPause: true)
