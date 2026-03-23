@@ -67,8 +67,14 @@ final class InstanceTracker {
         var result: [CGWindowID: Int] = [:]
 
         for (bundleID, appItems) in itemsByBundleID where appItems.count > 1 {
-            // Sort by current instance index (from MenuBarItemTag) for stability
-            let sortedItems = appItems.sorted { $0.tag.instanceIndex < $1.tag.instanceIndex }
+            // Sort by current instance index (from MenuBarItemTag) for stability.
+            // When indices are equal, sort by title for deterministic initial assignment.
+            let sortedItems = appItems.sorted {
+                if $0.tag.instanceIndex == $1.tag.instanceIndex {
+                    return $0.tag.title < $1.tag.title
+                }
+                return $0.tag.instanceIndex < $1.tag.instanceIndex
+            }
 
             // Check if we have known patterns for this app
             var knownPatterns = knownInstances[bundleID, default: [:]]

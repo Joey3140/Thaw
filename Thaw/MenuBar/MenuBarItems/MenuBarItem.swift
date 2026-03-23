@@ -195,7 +195,7 @@ struct MenuBarItem: CustomStringConvertible {
     /// This initializer does not perform validity checks on its parameters.
     /// Only call it if you are certain the window is a valid menu bar item.
     @MainActor
-    private init(uncheckedItemWindow itemWindow: WindowInfo, instanceIndex: Int = 0) {
+    init(uncheckedItemWindow itemWindow: WindowInfo, instanceIndex: Int = 0) {
         self.tag = MenuBarItemTag(uncheckedItemWindow: itemWindow, instanceIndex: instanceIndex)
         self.windowID = itemWindow.windowID
         self.ownerPID = itemWindow.ownerPID
@@ -212,7 +212,7 @@ struct MenuBarItem: CustomStringConvertible {
     /// and the source pid belongs to the application that created it.
     @available(macOS 26.0, *)
     @MainActor
-    private init(uncheckedItemWindow itemWindow: WindowInfo, sourcePID: pid_t?, instanceIndex: Int = 0) {
+    init(uncheckedItemWindow itemWindow: WindowInfo, sourcePID: pid_t?, instanceIndex: Int = 0) {
         self.tag = MenuBarItemTag(uncheckedItemWindow: itemWindow, sourcePID: sourcePID, instanceIndex: instanceIndex)
         self.windowID = itemWindow.windowID
         self.ownerPID = itemWindow.ownerPID
@@ -282,7 +282,7 @@ extension MenuBarItem {
     /// source pid retrieval for macOS 26.
     @available(macOS 26.0, *)
     @MainActor
-    private static func getMenuBarItemsExperimental(on display: CGDirectDisplayID?, option: ListOption) async -> [MenuBarItem] {
+    private static func getMenuBarItemsExperimental(on display: CGDirectDisplayID?, option: ListOption, instanceTracker: InstanceTracker?) async -> [MenuBarItem] {
         let windows = getMenuBarItemWindows(on: display, option: option)
         diagLog.debug("getMenuBarItemsExperimental: processing \(windows.count) windows for source PID resolution")
 
@@ -396,6 +396,25 @@ extension MenuBarItem {
             }
         }
 
+        // Apply instance tracker corrections if available.
+        // This ensures persistent instance indices across app restarts.
+        if let tracker = instanceTracker {
+            let correctedIndices = tracker.assignInstanceIndices(for: items)
+            var correctedCount = 0
+            for (windowID, correctedIndex) in correctedIndices {
+                if let itemIndex = items.firstIndex(where: { $0.windowID == windowID }),
+                   items[itemIndex].tag.instanceIndex != correctedIndex
+                {
+                    let sourcePID = items[itemIndex].sourcePID
+                    items[itemIndex] = MenuBarItem(uncheckedItemWindow: windows[itemIndex], sourcePID: sourcePID, instanceIndex: correctedIndex)
+                    correctedCount += 1
+                }
+            }
+            if correctedCount > 0 {
+                diagLog.debug("getMenuBarItemsExperimental: corrected instance indices for \(correctedCount) items using InstanceTracker")
+            }
+        }
+
         let nilPIDItems = items.filter { $0.sourcePID == nil }
         if !nilPIDItems.isEmpty {
             let itemsDesc = nilPIDItems.prefix(3).map(\.logString).joined(separator: ", ")
@@ -410,7 +429,7 @@ extension MenuBarItem {
     /// Creates and returns a list of menu bar items, defaulting to the
     /// legacy source pid behavior, prior to macOS 26.
     @MainActor
-    private static func getMenuBarItemsLegacyMethod(on display: CGDirectDisplayID?, option: ListOption) -> [MenuBarItem] {
+    private static func getMenuBarItemsLegacyMethod(on display: CGDirectDisplayID?, option: ListOption, instanceTracker: InstanceTracker?) -> [MenuBarItem] {
         let windows = getMenuBarItemWindows(on: display, option: option)
         var items = windows.map { MenuBarItem(uncheckedItemWindow: $0) }
 
@@ -428,6 +447,24 @@ extension MenuBarItem {
             }
         }
 
+        // Apply instance tracker corrections if available.
+        // This ensures persistent instance indices across app restarts.
+        if let tracker = instanceTracker {
+            let correctedIndices = tracker.assignInstanceIndices(for: items)
+            var correctedCount = 0
+            for (windowID, correctedIndex) in correctedIndices {
+                if let itemIndex = items.firstIndex(where: { $0.windowID == windowID }),
+                   items[itemIndex].tag.instanceIndex != correctedIndex
+                {
+                    items[itemIndex] = MenuBarItem(uncheckedItemWindow: windows[itemIndex], instanceIndex: correctedIndex)
+                    correctedCount += 1
+                }
+            }
+            if correctedCount > 0 {
+                diagLog.debug("getMenuBarItemsLegacyMethod: corrected instance indices for \(correctedCount) items using InstanceTracker")
+            }
+        }
+
         return items
     }
 
@@ -438,19 +475,20 @@ extension MenuBarItem {
     ///     items across all available displays.
     ///   - option: Options that filter the returned list. Pass an empty option set
     ///     to return all available menu bar items.
+    ///   - instanceTracker: Optional tracker for persistent instance indices across app restarts.
     @MainActor
-    static func getMenuBarItems(on display: CGDirectDisplayID? = nil, option: ListOption) async -> [MenuBarItem] {
+    static func getMenuBarItems(on display: CGDirectDisplayID? = nil, option: ListOption, instanceTracker: InstanceTracker? = nil) async -> [MenuBarItem] {
         let isMacOS26 = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 ||
             (ProcessInfo.processInfo.operatingSystemVersion.majorVersion == 15 &&
                 ProcessInfo.processInfo.operatingSystemVersion.minorVersion >= 4)
         diagLog.debug("getMenuBarItems: starting (macOS 26 path: \(isMacOS26 ? "experimental" : "legacy"))")
 
         if #available(macOS 26.0, *) {
-            let items = await getMenuBarItemsExperimental(on: display, option: option)
+            let items = await getMenuBarItemsExperimental(on: display, option: option, instanceTracker: instanceTracker)
             diagLog.debug("getMenuBarItems: experimental path returned \(items.count) items")
             return items
         } else {
-            let items = getMenuBarItemsLegacyMethod(on: display, option: option)
+            let items = getMenuBarItemsLegacyMethod(on: display, option: option, instanceTracker: instanceTracker)
             diagLog.debug("getMenuBarItems: legacy path returned \(items.count) items")
             return items
         }

@@ -845,14 +845,14 @@ extension MenuBarItemManager {
             let displayID = Bridging.getActiveMenuBarDisplayID()
             MenuBarItemManager.diagLog.debug("cacheItemsRegardless: displayID=\(displayID.map { "\($0)" } ?? "nil"), previousWindowIDs count=\(previousWindowIDs.count)")
 
-            var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            var items = await MenuBarItem.getMenuBarItems(option: .activeSpace, instanceTracker: instanceTracker)
 
             if items.isEmpty {
                 // Retry once after a small delay if we got zero items. This can happen
                 // due to transient WindowServer glitches or during display reconfigurations.
                 MenuBarItemManager.diagLog.warning("cacheItemsRegardless: getMenuBarItems returned ZERO items, retrying in 250ms...")
                 try? await Task.sleep(for: .milliseconds(250))
-                items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+                items = await MenuBarItem.getMenuBarItems(option: .activeSpace, instanceTracker: instanceTracker)
             }
 
             MenuBarItemManager.diagLog.debug("cacheItemsRegardless: getMenuBarItems returned \(items.count) items")
@@ -860,6 +860,10 @@ extension MenuBarItemManager {
             if items.isEmpty {
                 MenuBarItemManager.diagLog.error("cacheItemsRegardless: getMenuBarItems returned ZERO items even after retry — this is the root cause of 'Loading menu bar items' being stuck")
             }
+
+            // Prune instance tracker mappings for apps that are no longer running.
+            let runningBundleIDs = Set(items.compactMap { $0.sourceApplication?.bundleIdentifier })
+            instanceTracker.prune(runningBundleIDs: runningBundleIDs)
 
             let itemWindowIDs = currentItemWindowIDs ?? items.reversed().map { $0.windowID }
             await cacheActor.updateCachedItemWindowIDs(itemWindowIDs)
