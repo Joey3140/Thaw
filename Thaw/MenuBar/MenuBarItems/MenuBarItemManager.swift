@@ -181,23 +181,6 @@ final class MenuBarItemManager: ObservableObject {
     /// `uniqueIdentifier` strings (right-to-left, matching cache array order).
     private var savedSectionOrder = [String: [String]]()
 
-    // MARK: - New Robustness Trackers
-
-    /// Tracks persistent instance indices for multi-item apps.
-    /// Maintains stable indices across app restarts based on title patterns.
-    private let instanceTracker = InstanceTracker()
-
-    /// Tracks position consensus to determine when positions are stable.
-    /// Prevents acting on transient movements during app launches.
-    private let positionConsensus = PositionConsensus()
-
-    /// Tracks app lifecycle states to coordinate restoration timing.
-    /// Prevents restoring while apps are still loading items.
-    private let appLifecycleTracker = AppLifecycleTracker()
-
-    /// Detects and recovers menu bar items stuck at invalid positions.
-    private let stuckItemRecovery = StuckItemRecovery()
-
     /// Loads persisted known item identifiers.
     private func loadKnownItemIdentifiers() {
         let key = "MenuBarItemManager.knownItemIdentifiers"
@@ -848,11 +831,8 @@ extension MenuBarItemManager {
             isRestoringItemOrderTimestamp = nil
         }
 
-        // Only save section order when positions are stable and we're not in a transition state.
-        if !isRestoringItemOrder, !isResettingLayout, !isInStartupSettling, positionConsensus.hasRecentConsensus {
+        if !isRestoringItemOrder, !isResettingLayout, !isInStartupSettling {
             saveSectionOrder(from: context.cache)
-        } else if !positionConsensus.hasRecentConsensus {
-            MenuBarItemManager.diagLog.debug("Skipping section order save - positions not yet stable")
         }
         MenuBarItemManager.diagLog.debug("Updated menu bar item cache: visible=\(context.cache[.visible].count), hidden=\(context.cache[.hidden].count), alwaysHidden=\(context.cache[.alwaysHidden].count)")
     }
@@ -922,9 +902,6 @@ extension MenuBarItemManager {
                 MenuBarItemManager.diagLog.debug("cacheItemsRegardless: item tag=\(item.tag) title=\(item.title ?? "nil") windowID=\(item.windowID) sourcePID=\(item.sourcePID.map { "\($0)" } ?? "nil") ownerPID=\(item.ownerPID)")
             }
 
-            // Update app lifecycle tracker with current items.
-            appLifecycleTracker.update(with: items)
-
             // Obtain window IDs from the actual ControlItem objects so the
             // fallback lookup in ControlItemPair can match by window ID when
             // the tag-based and title-based lookups fail (macOS 26+).
@@ -956,25 +933,6 @@ extension MenuBarItemManager {
             MenuBarItemManager.diagLog.debug("cacheItemsRegardless: found control items, hidden windowID=\(controlItems.hidden.windowID), alwaysHidden=\(controlItems.alwaysHidden.map { "\($0.windowID)" } ?? "nil")")
 
             await enforceControlItemOrder(controlItems: controlItems)
-
-            // Check for and attempt to recover stuck items.
-            let stuckItems = stuckItemRecovery.detectStuckItems(in: items)
-            if !stuckItems.isEmpty {
-                MenuBarItemManager.diagLog.warning("Detected \(stuckItems.count) stuck items, attempting recovery")
-                for stuckItem in stuckItems {
-                    let recovered = await stuckItemRecovery.recoverStuckItem(stuckItem, controlItems: (controlItems.hidden, controlItems.alwaysHidden)) { item, destination in
-                        try await self.move(item: item, to: destination, skipInputPause: true)
-                    }
-                    if recovered {
-                        // Schedule a recache after recovery
-                        Task { [weak self] in
-                            try? await Task.sleep(for: MenuBarItemManager.uiSettleDelay)
-                            await self?.cacheItemsRegardless(skipRecentMoveCheck: true)
-                        }
-                        return
-                    }
-                }
-            }
 
             if await relocateNewLeftmostItems(
                 items,
@@ -1011,23 +969,6 @@ extension MenuBarItemManager {
             guard !isInStartupSettling else {
                 await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
                 MenuBarItemManager.diagLog.debug("cacheItemsRegardless: startup settling active, skipping restore")
-                return
-            }
-
-            // Wait for position consensus before attempting restoration.
-            // This prevents acting on transient movements during app launches.
-            let hasConsensus = positionConsensus.observe(items: items)
-            if !hasConsensus {
-                MenuBarItemManager.diagLog.debug("cacheItemsRegardless: waiting for position consensus before restore")
-                await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
-                return
-            }
-
-            // Check if any apps are still loading items - defer restoration if so.
-            let itemIdentifiers = items.map { $0.tag.tagIdentifier }
-            if appLifecycleTracker.shouldDeferRestoration(for: itemIdentifiers) {
-                MenuBarItemManager.diagLog.debug("cacheItemsRegardless: deferring restore - apps still loading")
-                await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
                 return
             }
 
@@ -2017,10 +1958,6 @@ extension MenuBarItemManager {
         guard let appState else {
             throw EventError.cannotComplete
         }
-
-        // Record that an intentional move is happening.
-        // This resets position consensus since positions will change.
-        positionConsensus.recordIntentionalMove()
 
         // Check if item is already in a blocked state before attempting to move
         // This prevents trying to move items that are already stuck
@@ -3315,12 +3252,6 @@ extension MenuBarItemManager {
                 continue
             }
 
-            // Skip if the app is still loading items - wait for it to stabilize.
-            if !appLifecycleTracker.isReadyForRestoration(for: ns) {
-                MenuBarItemManager.diagLog.debug("Skipping restore for \(item.logString) - app still loading")
-                continue
-            }
-
             guard let currentSection = context.findSection(for: item) else { continue }
 
             // Look up saved section: prefer base identifier match (handles instanceIndex changes),
@@ -3769,12 +3700,6 @@ extension MenuBarItemManager {
         persistPendingRelocations()
         persistSavedSectionOrder()
         temporarilyShownItemContexts.removeAll()
-
-        // Reset all robustness trackers.
-        instanceTracker.reset()
-        positionConsensus.reset()
-        appLifecycleTracker.reset()
-        stuckItemRecovery.reset()
 
         // Prevent the first post-reset cache pass from treating the freshly reset items as "new".
         suppressNextNewLeftmostItemRelocation = true
