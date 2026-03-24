@@ -2,7 +2,6 @@
 //  FocusFilterIntent.swift
 //  Project: Thaw
 //
-//  Copyright (Ice) © 2023–2025 Jordan Baird
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
@@ -37,12 +36,10 @@ struct ProfileEntityQuery: EntityQuery {
     }
 
     private func allProfiles() -> [ProfileEntity] {
-        guard let appSupport = FileManager.default.urls(
+        let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first else {
-            return []
-        }
+        ).first!
         let manifestURL = appSupport
             .appendingPathComponent("Thaw/Profiles/profiles.json")
 
@@ -82,7 +79,7 @@ struct ThawFocusFilter: SetFocusFilterIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         guard let profile,
-              UUID(uuidString: profile.id) != nil
+              let profileID = UUID(uuidString: profile.id)
         else {
             // Focus deactivated — clear the stored profile and notify.
             UserDefaults.standard.removeObject(forKey: "FocusFilterRequestedProfileID")

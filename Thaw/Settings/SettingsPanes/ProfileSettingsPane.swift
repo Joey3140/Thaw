@@ -2,7 +2,6 @@
 //  ProfileSettingsPane.swift
 //  Project: Thaw
 //
-//  Copyright (Ice) © 2023–2025 Jordan Baird
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
@@ -77,20 +76,14 @@ struct ProfileSettingsPane: View {
                 }
                 .buttonStyle(.bordered)
             } else {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.title2)
-                    .opacity(profile.id == profileManager.activeProfileID ? 1 : 0)
-
-                VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    if profile.id == profileManager.activeProfileID {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.body)
+                    }
                     Text(profile.name)
                         .font(.headline)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Created: \(profile.createdAt.formatted(date: .abbreviated, time: .shortened))")
-                        Text("Modified: \(profile.modifiedAt.formatted(date: .abbreviated, time: .shortened))")
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 }
 
                 Spacer()
@@ -101,27 +94,11 @@ struct ProfileSettingsPane: View {
                 .buttonStyle(.bordered)
                 .disabled(isApplying || profile.id == profileManager.activeProfileID)
 
-                Menu {
-                    Button("Update All") {
-                        updateProfile(id: profile.id, scope: .all)
-                    }
-                    Button("Update Layout Only") {
-                        updateProfile(id: profile.id, scope: .layoutOnly)
-                    }
-                    Button("Update Configuration Only") {
-                        updateProfile(id: profile.id, scope: .configurationOnly)
-                    }
-                    Divider()
-                    Button("Update Configuration on All Profiles") {
-                        updateConfigurationOnAllProfiles()
-                    }
-                } label: {
-                    Text("Update")
-                } primaryAction: {
-                    updateProfile(id: profile.id, scope: .all)
+                Button("Update") {
+                    updateProfile(id: profile.id)
                 }
-                .menuStyle(.borderlessButton)
-                .help("Update this profile with the current state")
+                .buttonStyle(.bordered)
+                .help("Overwrite this profile with the current configuration")
 
                 Menu {
                     Button("Rename") {
@@ -162,8 +139,7 @@ struct ProfileSettingsPane: View {
             }
         } message: {
             if let id = profileToDelete,
-               let profile = profileManager.profiles.first(where: { $0.id == id })
-            {
+               let profile = profileManager.profiles.first(where: { $0.id == id }) {
                 Text("Are you sure you want to delete the profile \"\(profile.name)\"? This cannot be undone.")
             }
         }
@@ -186,30 +162,21 @@ struct ProfileSettingsPane: View {
             }
             .buttonStyle(.bordered)
             .disabled(newProfileName.trimmingCharacters(in: .whitespaces).isEmpty)
-        }
 
-        HStack {
-            Spacer()
             Button {
                 importProfile()
             } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "square.and.arrow.down")
-                        .frame(width: 14, height: 14)
-                    Text("Import Profile(s)")
-                }
+                Image(systemName: "square.and.arrow.down")
             }
             .buttonStyle(.bordered)
+            .help("Import a profile from file")
+        }
 
-            if !profileManager.profiles.isEmpty {
-                Button {
+        if !profileManager.profiles.isEmpty {
+            HStack {
+                Spacer()
+                Button("Export All Profiles") {
                     exportAllProfiles()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "square.and.arrow.up")
-                            .frame(width: 14, height: 14)
-                        Text("Export Profile(s)")
-                    }
                 }
                 .buttonStyle(.bordered)
             }
@@ -225,7 +192,7 @@ struct ProfileSettingsPane: View {
     }
 
     private var focusFilterFooter: some View {
-        HStack(alignment: .center, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
             Image(systemName: "info.circle")
                 .foregroundStyle(.secondary)
                 .font(.callout)
@@ -237,13 +204,6 @@ struct ProfileSettingsPane: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
-            Button("Open Focus Settings") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.Focus") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-            .buttonStyle(.bordered)
         }
     }
 
@@ -310,26 +270,11 @@ struct ProfileSettingsPane: View {
         }
     }
 
-    private func updateProfile(id: UUID, scope: ProfileManager.ProfileUpdateScope = .all) {
+    private func updateProfile(id: UUID) {
         do {
-            try profileManager.updateProfile(id: id, scope: scope, appState: appState)
+            try profileManager.updateProfileWithCurrentState(id: id, appState: appState)
         } catch {
             errorMessage = error.localizedDescription
-            showingError = true
-        }
-    }
-
-    private func updateConfigurationOnAllProfiles() {
-        var failed = 0
-        for profile in profileManager.profiles {
-            do {
-                try profileManager.updateProfile(id: profile.id, scope: .configurationOnly, appState: appState)
-            } catch {
-                failed += 1
-            }
-        }
-        if failed > 0 {
-            errorMessage = "Failed to update configuration on \(failed) profile(s)."
             showingError = true
         }
     }
@@ -365,7 +310,6 @@ struct ProfileSettingsPane: View {
             try profileManager.deleteProfile(id: id)
             if profileManager.activeProfileID == id {
                 profileManager.activeProfileID = nil
-                appState.itemManager.clearActiveProfileLayout()
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -390,23 +334,14 @@ struct ProfileSettingsPane: View {
     }
 
     private func exportAllProfiles() {
-        guard let json = profileManager.exportAllProfiles() else {
-            errorMessage = "Failed to encode profiles for export."
-            showingError = true
-            return
-        }
+        guard let json = profileManager.exportAllProfiles() else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "Thaw Profiles.json"
         panel.canCreateDirectories = true
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try json.write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            errorMessage = error.localizedDescription
-            showingError = true
-        }
+        try? json.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private func importProfile() {

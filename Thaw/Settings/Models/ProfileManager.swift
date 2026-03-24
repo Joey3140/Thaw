@@ -2,7 +2,6 @@
 //  ProfileManager.swift
 //  Project: Thaw
 //
-//  Copyright (Ice) © 2023–2025 Jordan Baird
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
@@ -28,12 +27,10 @@ final class ProfileManager: ObservableObject {
     private var lastActiveDisplayUUID: String?
     /// Whether a Focus Filter profile is currently applied.
     private var focusFilterActive = false
+    /// The in-flight layout apply task, if any. Cancelled before starting a new one.
     /// The in-flight layout apply task. Exposed for callers that need to
     /// wait for the layout to finish (e.g. the Apply button).
     private(set) var layoutTask: Task<Void, Never>?
-
-    /// Generation counter to prevent older layout tasks from clearing newer ones.
-    private var layoutGeneration: UInt = 0
 
     /// Hotkeys for switching to each profile, keyed by profile ID.
     @Published private(set) var profileHotkeys: [UUID: Hotkey] = [:]
@@ -52,12 +49,10 @@ final class ProfileManager: ObservableObject {
         dec.dateDecodingStrategy = .iso8601
         decoder = dec
 
-        guard let appSupport = FileManager.default.urls(
+        let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first else {
-            fatalError("Application Support directory not found")
-        }
+        ).first!
         profilesDirectory = appSupport
             .appendingPathComponent("Thaw/Profiles", isDirectory: true)
         manifestURL = profilesDirectory
@@ -113,6 +108,8 @@ final class ProfileManager: ObservableObject {
                 Task { await self.handleFocusFilterDeactivated() }
             }
             .store(in: &cancellables)
+
+
 
         // Check if a Focus Filter is currently active. If so, apply it;
         // otherwise fall back to display-based profile.
@@ -184,16 +181,79 @@ final class ProfileManager: ObservableObject {
 
     /// Captures the current app state and saves it as a named profile.
     func saveProfile(name: String, from appState: AppState) throws {
+        let generalSnapshot = GeneralSettingsSnapshot.capture(
+            from: appState.settings.general
+        )
+        let advancedSnapshot = AdvancedSettingsSnapshot.capture(
+            from: appState.settings.advanced
+        )
+
+        let hotkeys = Defaults.dictionary(forKey: .hotkeys) as? [String: Data] ?? [:]
+
+        let displayConfigurations = appState.settings.displaySettings.configurations
+
+        let appearanceConfiguration = appState.appearanceManager.configuration
+
+        let savedSectionOrder = UserDefaults.standard.dictionary(
+            forKey: "MenuBarItemManager.savedSectionOrder"
+        ) as? [String: [String]] ?? [:]
+        let pinnedHiddenBundleIDs = UserDefaults.standard.array(
+            forKey: "MenuBarItemManager.pinnedHiddenBundleIDs"
+        ) as? [String] ?? []
+        let pinnedAlwaysHiddenBundleIDs = UserDefaults.standard.array(
+            forKey: "MenuBarItemManager.pinnedAlwaysHiddenBundleIDs"
+        ) as? [String] ?? []
+        let customNames = Defaults.dictionary(
+            forKey: .menuBarItemCustomNames
+        ) as? [String: String] ?? [:]
+
+        // Capture per-item section assignments and ordering from the live cache.
+        // This is the primary source of truth — it handles apps like Control Center
+        // that share a single bundle ID across many items (WiFi, Battery, etc.).
+        var itemSectionMap = [String: String]()
+        var itemOrder = [String: [String]]()
+        let cache = appState.itemManager.itemCache
+        for section in MenuBarSection.Name.allCases {
+            let sectionKey: String
+            switch section {
+            case .visible: sectionKey = "visible"
+            case .hidden: sectionKey = "hidden"
+            case .alwaysHidden: sectionKey = "alwaysHidden"
+            }
+            var orderedIDs = [String]()
+            for item in cache.managedItems(for: section)
+                where item.canBeHidden || item.isControlItem
+            {
+                let uid = item.uniqueIdentifier
+                itemSectionMap[uid] = sectionKey
+                orderedIDs.append(uid)
+            }
+            if !orderedIDs.isEmpty {
+                itemOrder[sectionKey] = orderedIDs
+            }
+        }
+
+        let layout = MenuBarLayoutSnapshot(
+            savedSectionOrder: savedSectionOrder,
+            pinnedHiddenBundleIDs: pinnedHiddenBundleIDs,
+            pinnedAlwaysHiddenBundleIDs: pinnedAlwaysHiddenBundleIDs,
+            customNames: customNames,
+            itemSectionMap: itemSectionMap,
+            itemOrder: itemOrder
+        )
+
+        let now = Date()
         let profile = Profile(
+            id: UUID(),
             name: name,
-            content: ProfileContent(
-                generalSettings: GeneralSettingsSnapshot.capture(from: appState.settings.general),
-                advancedSettings: AdvancedSettingsSnapshot.capture(from: appState.settings.advanced),
-                hotkeys: Defaults.dictionary(forKey: .hotkeys) as? [String: Data] ?? [:],
-                displayConfigurations: appState.settings.displaySettings.configurations,
-                appearanceConfiguration: appState.appearanceManager.configuration,
-                menuBarLayout: captureCurrentLayout(from: appState)
-            )
+            createdAt: now,
+            modifiedAt: now,
+            generalSettings: generalSnapshot,
+            advancedSettings: advancedSnapshot,
+            hotkeys: hotkeys,
+            displayConfigurations: displayConfigurations,
+            appearanceConfiguration: appearanceConfiguration,
+            menuBarLayout: layout
         )
 
         let data = try encoder.encode(profile)
@@ -262,8 +322,6 @@ final class ProfileManager: ObservableObject {
         let sectionOrder = profile.menuBarLayout.savedSectionOrder
         let itemSectionMap = profile.menuBarLayout.itemSectionMap ?? [:]
         let itemOrder = profile.menuBarLayout.itemOrder ?? [:]
-        layoutGeneration &+= 1
-        let generation = layoutGeneration
         layoutTask = Task { [weak self] in
             await appState.itemManager.applyProfileLayout(
                 pinnedHidden: pinnedHidden,
@@ -272,9 +330,7 @@ final class ProfileManager: ObservableObject {
                 itemSectionMap: itemSectionMap,
                 itemOrder: itemOrder
             )
-            if self?.layoutGeneration == generation {
-                self?.layoutTask = nil
-            }
+            self?.layoutTask = nil
         }
     }
 
@@ -294,17 +350,24 @@ final class ProfileManager: ObservableObject {
             name: newName,
             createdAt: profile.createdAt,
             modifiedAt: Date(),
-            content: profile.content
+            generalSettings: profile.generalSettings,
+            advancedSettings: profile.advancedSettings,
+            hotkeys: profile.hotkeys,
+            displayConfigurations: profile.displayConfigurations,
+            appearanceConfiguration: profile.appearanceConfiguration,
+            menuBarLayout: profile.menuBarLayout
         )
 
         let data = try encoder.encode(profile)
         try data.write(to: profileURL(for: id), options: .atomic)
 
         if let index = profiles.firstIndex(where: { $0.id == id }) {
-            var updated = profiles[index]
-            updated.name = newName
-            updated.modifiedAt = profile.modifiedAt
-            profiles[index] = updated
+            profiles[index] = ProfileMetadata(
+                id: id,
+                name: newName,
+                createdAt: profiles[index].createdAt,
+                modifiedAt: profile.modifiedAt
+            )
         }
         saveManifest()
     }
@@ -312,9 +375,19 @@ final class ProfileManager: ObservableObject {
     /// Duplicates an existing profile with a new name.
     func duplicateProfile(id: UUID, newName: String) throws {
         let original = try loadProfile(id: id)
+        let now = Date()
+
         let duplicate = Profile(
+            id: UUID(),
             name: newName,
-            content: original.content
+            createdAt: now,
+            modifiedAt: now,
+            generalSettings: original.generalSettings,
+            advancedSettings: original.advancedSettings,
+            hotkeys: original.hotkeys,
+            displayConfigurations: original.displayConfigurations,
+            appearanceConfiguration: original.appearanceConfiguration,
+            menuBarLayout: original.menuBarLayout
         )
 
         let data = try encoder.encode(duplicate)
@@ -330,24 +403,17 @@ final class ProfileManager: ObservableObject {
         saveManifest()
     }
 
-    /// Exports a profile to a file, including display associations.
+    /// Exports a profile to an external URL.
     func exportProfile(id: UUID, to url: URL) throws {
-        let profile = try loadProfile(id: id)
-        let meta = profiles.first { $0.id == id }
-        let entry = ProfileExportEntry(
-            profile: profile,
-            associatedDisplayUUID: meta?.associatedDisplayUUID,
-            associatedDisplayName: meta?.associatedDisplayName
-        )
-        let bundle = ProfileExportBundle(entries: [entry])
-        let data = try encoder.encode(bundle)
-        try data.write(to: url, options: .atomic)
+        let source = profileURL(for: id)
+        try FileManager.default.copyItem(at: source, to: url)
     }
 
     /// Overwrites an existing profile with the current app state,
     /// keeping its id, name, display association, and creation date.
     func updateProfileWithCurrentState(id: UUID, appState: AppState) throws {
-        guard let old = profiles.first(where: { $0.id == id }) else { return }
+        let old = profiles.first { $0.id == id }
+        guard old != nil else { return }
 
         // Save as new profile first (captures all current state).
         let tempName = "__temp_update__"
@@ -358,10 +424,15 @@ final class ProfileManager: ObservableObject {
         var updated = try loadProfile(id: tempMeta.id)
         updated = Profile(
             id: id,
-            name: old.name,
-            createdAt: old.createdAt,
+            name: old!.name,
+            createdAt: old!.createdAt,
             modifiedAt: Date(),
-            content: updated.content
+            generalSettings: updated.generalSettings,
+            advancedSettings: updated.advancedSettings,
+            hotkeys: updated.hotkeys,
+            displayConfigurations: updated.displayConfigurations,
+            appearanceConfiguration: updated.appearanceConfiguration,
+            menuBarLayout: updated.menuBarLayout
         )
 
         let data = try encoder.encode(updated)
@@ -378,130 +449,15 @@ final class ProfileManager: ObservableObject {
         saveManifest()
     }
 
-    // MARK: - Capture Helpers
-
-    /// Captures the current menu bar layout from the app state.
-    private func captureCurrentLayout(from appState: AppState) -> MenuBarLayoutSnapshot {
-        let savedSectionOrder = UserDefaults.standard.dictionary(
-            forKey: "MenuBarItemManager.savedSectionOrder"
-        ) as? [String: [String]] ?? [:]
-        let pinnedHiddenBundleIDs = UserDefaults.standard.array(
-            forKey: "MenuBarItemManager.pinnedHiddenBundleIDs"
-        ) as? [String] ?? []
-        let pinnedAlwaysHiddenBundleIDs = UserDefaults.standard.array(
-            forKey: "MenuBarItemManager.pinnedAlwaysHiddenBundleIDs"
-        ) as? [String] ?? []
-        let customNames = Defaults.dictionary(
-            forKey: .menuBarItemCustomNames
-        ) as? [String: String] ?? [:]
-
-        var itemSectionMap = [String: String]()
-        var itemOrder = [String: [String]]()
-        let cache = appState.itemManager.itemCache
-        for section in MenuBarSection.Name.allCases {
-            let sectionKey: String
-            switch section {
-            case .visible: sectionKey = "visible"
-            case .hidden: sectionKey = "hidden"
-            case .alwaysHidden: sectionKey = "alwaysHidden"
-            }
-            var orderedIDs = [String]()
-            for item in cache.managedItems(for: section)
-                where item.canBeHidden || item.isControlItem
-            {
-                let uid = item.uniqueIdentifier
-                itemSectionMap[uid] = sectionKey
-                orderedIDs.append(uid)
-            }
-            if !orderedIDs.isEmpty {
-                itemOrder[sectionKey] = orderedIDs
-            }
-        }
-
-        return MenuBarLayoutSnapshot(
-            savedSectionOrder: savedSectionOrder,
-            pinnedHiddenBundleIDs: pinnedHiddenBundleIDs,
-            pinnedAlwaysHiddenBundleIDs: pinnedAlwaysHiddenBundleIDs,
-            customNames: customNames,
-            itemSectionMap: itemSectionMap,
-            itemOrder: itemOrder
-        )
-    }
-
-    /// Applies the current configuration (settings, hotkeys, appearance) to a profile.
-    private func applyCurrentConfiguration(to profile: inout Profile, from appState: AppState) {
-        profile.generalSettings = GeneralSettingsSnapshot.capture(
-            from: appState.settings.general
-        )
-        profile.advancedSettings = AdvancedSettingsSnapshot.capture(
-            from: appState.settings.advanced
-        )
-        profile.hotkeys = Defaults.dictionary(forKey: .hotkeys) as? [String: Data] ?? [:]
-        profile.displayConfigurations = appState.settings.displaySettings.configurations
-        profile.appearanceConfiguration = appState.appearanceManager.configuration
-    }
-
-    /// Saves a profile to disk and updates the manifest.
-    private func saveProfileAndUpdateManifest(_ profile: Profile) throws {
-        let data = try encoder.encode(profile)
-        try data.write(to: profileURL(for: profile.id), options: .atomic)
-
-        if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
-            profiles[index].modifiedAt = profile.modifiedAt
-        }
-        saveManifest()
-    }
-
-    // MARK: - Scoped Updates
-
-    /// What parts of a profile to update.
-    enum ProfileUpdateScope {
-        case all
-        case layoutOnly
-        case configurationOnly
-    }
-
-    /// Updates a profile with only the specified scope of current state.
-    func updateProfile(id: UUID, scope: ProfileUpdateScope, appState: AppState) throws {
-        switch scope {
-        case .all:
-            try updateProfileWithCurrentState(id: id, appState: appState)
-        case .layoutOnly:
-            try updateProfileLayout(id: id, appState: appState)
-        case .configurationOnly:
-            try updateProfileConfiguration(id: id, appState: appState)
-        }
-    }
-
-    /// Updates only the menu bar layout of an existing profile.
-    private func updateProfileLayout(id: UUID, appState: AppState) throws {
-        var profile = try loadProfile(id: id)
-        profile.menuBarLayout = captureCurrentLayout(from: appState)
-        profile.modifiedAt = Date()
-        try saveProfileAndUpdateManifest(profile)
-    }
-
-    /// Updates only the configuration (settings, hotkeys, appearance) of an existing profile.
-    private func updateProfileConfiguration(id: UUID, appState: AppState) throws {
-        var profile = try loadProfile(id: id)
-        applyCurrentConfiguration(to: &profile, from: appState)
-        profile.modifiedAt = Date()
-        try saveProfileAndUpdateManifest(profile)
-    }
-
-    /// Exports all profiles as a single JSON file including metadata.
+    /// Exports all profiles as a single JSON array.
     func exportAllProfiles() -> String? {
-        var entries = [ProfileExportEntry]()
+        var allProfiles = [Profile]()
         for meta in profiles {
-            guard let profile = try? loadProfile(id: meta.id) else { continue }
-            entries.append(ProfileExportEntry(
-                profile: profile,
-                associatedDisplayUUID: meta.associatedDisplayUUID,
-                associatedDisplayName: meta.associatedDisplayName
-            ))
+            if let profile = try? loadProfile(id: meta.id) {
+                allProfiles.append(profile)
+            }
         }
-        let bundle = ProfileExportBundle(entries: entries)
-        guard let data = try? encoder.encode(bundle) else { return nil }
+        guard let data = try? encoder.encode(allProfiles) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
@@ -525,10 +481,9 @@ final class ProfileManager: ObservableObject {
     }
 
     /// Clears the display association from whichever profile currently holds it.
-    func setAssociatedDisplay(uuid _: String?, forDisplayUUID displayUUID: String) {
+    func setAssociatedDisplay(uuid: String?, forDisplayUUID displayUUID: String) {
         for index in profiles.indices where profiles[index].associatedDisplayUUID == displayUUID {
             profiles[index].associatedDisplayUUID = nil
-            profiles[index].associatedDisplayName = nil
         }
         saveManifest()
     }
@@ -585,8 +540,8 @@ final class ProfileManager: ObservableObject {
             hotkey.$keyCombination
                 .dropFirst() // Skip the initial value we just set.
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] newCombo in
-                    guard let self else { return }
+                .sink { [weak self, weak appState] newCombo in
+                    guard let self, let appState else { return }
                     // Persist.
                     var dict = Defaults.dictionary(forKey: .profileHotkeys) as? [String: Data] ?? [:]
                     if let combo = newCombo, let data = try? enc.encode(combo) {
@@ -626,7 +581,7 @@ final class ProfileManager: ObservableObject {
         guard let idString = UserDefaults.standard.string(
             forKey: "FocusFilterRequestedProfileID"
         ),
-            let profileID = UUID(uuidString: idString)
+              let profileID = UUID(uuidString: idString)
         else { return }
 
         guard profileID != activeProfileID else {
@@ -675,41 +630,38 @@ final class ProfileManager: ObservableObject {
         }
     }
 
-    /// Imports profiles from a file.
+    /// Imports a profile from an external URL.
     func importProfile(from url: URL) throws {
         let data = try Data(contentsOf: url)
-        let bundle = try decoder.decode(ProfileExportBundle.self, from: data)
+        let original = try decoder.decode(Profile.self, from: data)
+        let now = Date()
 
-        for entry in bundle.entries {
-            let imported = Profile(
-                name: entry.profile.name,
-                content: entry.profile.content
-            )
+        let imported = Profile(
+            id: UUID(),
+            name: original.name,
+            createdAt: now,
+            modifiedAt: now,
+            generalSettings: original.generalSettings,
+            advancedSettings: original.advancedSettings,
+            hotkeys: original.hotkeys,
+            displayConfigurations: original.displayConfigurations,
+            appearanceConfiguration: original.appearanceConfiguration,
+            menuBarLayout: original.menuBarLayout
+        )
 
-            let importedData = try encoder.encode(imported)
-            try importedData.write(
-                to: profileURL(for: imported.id),
-                options: .atomic
-            )
+        let importedData = try encoder.encode(imported)
+        try importedData.write(
+            to: profileURL(for: imported.id),
+            options: .atomic
+        )
 
-            let metadata = ProfileMetadata(
-                id: imported.id,
-                name: imported.name,
-                createdAt: imported.createdAt,
-                modifiedAt: imported.modifiedAt
-            )
-            profiles.append(metadata)
-
-            // Reconcile display ownership through the setter so any existing
-            // profile that owns this display has its association cleared first.
-            if let displayUUID = entry.associatedDisplayUUID {
-                setAssociatedDisplay(
-                    uuid: displayUUID,
-                    displayName: entry.associatedDisplayName,
-                    forProfileID: imported.id
-                )
-            }
-        }
+        let metadata = ProfileMetadata(
+            id: imported.id,
+            name: imported.name,
+            createdAt: imported.createdAt,
+            modifiedAt: imported.modifiedAt
+        )
+        profiles.append(metadata)
         saveManifest()
     }
 }

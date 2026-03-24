@@ -865,9 +865,11 @@ final class ControlItem {
         else { return }
         let profileManager = appState.profileManager
         Task {
-            guard let profile = try? profileManager.loadProfile(id: profileID) else { return }
-            profileManager.activeProfileID = profileID
-            profileManager.applyProfile(profile, to: appState)
+            do {
+                let profile = try profileManager.loadProfile(id: profileID)
+                profileManager.activeProfileID = profileID
+                profileManager.applyProfile(profile, to: appState)
+            } catch {}
         }
     }
 

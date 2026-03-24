@@ -403,14 +403,12 @@ final class MenuBarManager: ObservableObject {
             appState.profileManager.layoutTask == nil,
             profileID != appState.profileManager.activeProfileID
         else { return }
-        Task { [weak self] in
+        Task {
             do {
                 let profile = try appState.profileManager.loadProfile(id: profileID)
                 appState.profileManager.activeProfileID = profileID
                 appState.profileManager.applyProfile(profile, to: appState)
-            } catch {
-                self?.diagLog.error("Failed to apply profile \(profileID): \(error)")
-            }
+            } catch {}
         }
     }
 

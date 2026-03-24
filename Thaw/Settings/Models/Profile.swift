@@ -2,7 +2,6 @@
 //  Profile.swift
 //  Project: Thaw
 //
-//  Copyright (Ice) © 2023–2025 Jordan Baird
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
@@ -28,7 +27,6 @@ struct ProfileMetadata: Codable, Identifiable, Hashable {
 struct GeneralSettingsSnapshot: Codable {
     var showIceIcon: Bool
     var iceIcon: ControlItemImageSet
-    var lastCustomIceIcon: ControlItemImageSet?
     var customIceIconIsTemplate: Bool
     var useIceBar: Bool
     var useIceBarOnlyOnNotchedDisplay: Bool
@@ -48,7 +46,6 @@ struct GeneralSettingsSnapshot: Codable {
         GeneralSettingsSnapshot(
             showIceIcon: settings.showIceIcon,
             iceIcon: settings.iceIcon,
-            lastCustomIceIcon: settings.lastCustomIceIcon,
             customIceIconIsTemplate: settings.customIceIconIsTemplate,
             useIceBar: settings.useIceBar,
             useIceBarOnlyOnNotchedDisplay: settings.useIceBarOnlyOnNotchedDisplay,
@@ -68,9 +65,8 @@ struct GeneralSettingsSnapshot: Codable {
     @MainActor
     func apply(to settings: GeneralSettings) {
         settings.showIceIcon = showIceIcon
-        settings.lastCustomIceIcon = lastCustomIceIcon
-        settings.customIceIconIsTemplate = customIceIconIsTemplate
         settings.iceIcon = iceIcon
+        settings.customIceIconIsTemplate = customIceIconIsTemplate
         settings.useIceBar = useIceBar
         settings.useIceBarOnlyOnNotchedDisplay = useIceBarOnlyOnNotchedDisplay
         settings.iceBarLocation = iceBarLocation
@@ -156,18 +152,6 @@ struct MenuBarLayoutSnapshot: Codable {
     var itemOrder: [String: [String]]?
 }
 
-// MARK: - ProfileContent
-
-/// Groups all settings data for a profile, used to reduce init parameter count.
-struct ProfileContent {
-    var generalSettings: GeneralSettingsSnapshot
-    var advancedSettings: AdvancedSettingsSnapshot
-    var hotkeys: [String: Data]
-    var displayConfigurations: [String: DisplayIceBarConfiguration]
-    var appearanceConfiguration: MenuBarAppearanceConfigurationV2
-    var menuBarLayout: MenuBarLayoutSnapshot
-}
-
 // MARK: - Profile
 
 /// A complete settings profile that can be saved to and restored from disk.
@@ -193,18 +177,6 @@ struct Profile: Codable, Identifiable {
         )
     }
 
-    /// Returns the settings content of this profile.
-    var content: ProfileContent {
-        ProfileContent(
-            generalSettings: generalSettings,
-            advancedSettings: advancedSettings,
-            hotkeys: hotkeys,
-            displayConfigurations: displayConfigurations,
-            appearanceConfiguration: appearanceConfiguration,
-            menuBarLayout: menuBarLayout
-        )
-    }
-
     // MARK: - Forward-Compatible Decoding
 
     enum CodingKeys: String, CodingKey {
@@ -221,22 +193,27 @@ struct Profile: Codable, Identifiable {
     }
 
     init(
-        id: UUID = UUID(),
+        id: UUID,
         name: String,
-        createdAt: Date = Date(),
-        modifiedAt: Date = Date(),
-        content: ProfileContent
+        createdAt: Date,
+        modifiedAt: Date,
+        generalSettings: GeneralSettingsSnapshot,
+        advancedSettings: AdvancedSettingsSnapshot,
+        hotkeys: [String: Data],
+        displayConfigurations: [String: DisplayIceBarConfiguration],
+        appearanceConfiguration: MenuBarAppearanceConfigurationV2,
+        menuBarLayout: MenuBarLayoutSnapshot
     ) {
         self.id = id
         self.name = name
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
-        self.generalSettings = content.generalSettings
-        self.advancedSettings = content.advancedSettings
-        self.hotkeys = content.hotkeys
-        self.displayConfigurations = content.displayConfigurations
-        self.appearanceConfiguration = content.appearanceConfiguration
-        self.menuBarLayout = content.menuBarLayout
+        self.generalSettings = generalSettings
+        self.advancedSettings = advancedSettings
+        self.hotkeys = hotkeys
+        self.displayConfigurations = displayConfigurations
+        self.appearanceConfiguration = appearanceConfiguration
+        self.menuBarLayout = menuBarLayout
     }
 
     init(from decoder: Decoder) throws {
@@ -253,7 +230,6 @@ struct Profile: Codable, Identifiable {
         ) ?? GeneralSettingsSnapshot(
             showIceIcon: Defaults.DefaultValue.showIceIcon,
             iceIcon: Defaults.DefaultValue.iceIcon,
-            lastCustomIceIcon: nil,
             customIceIconIsTemplate: Defaults.DefaultValue.customIceIconIsTemplate,
             useIceBar: Defaults.DefaultValue.useIceBar,
             useIceBarOnlyOnNotchedDisplay: Defaults.DefaultValue.useIceBarOnlyOnNotchedDisplay,
@@ -310,20 +286,4 @@ struct Profile: Codable, Identifiable {
             customNames: [:]
         )
     }
-}
-
-// MARK: - ProfileExportEntry
-
-/// A single profile bundled with its metadata for export/import.
-/// Preserves display associations that live on the manifest.
-struct ProfileExportEntry: Codable {
-    var profile: Profile
-    var associatedDisplayUUID: String?
-    var associatedDisplayName: String?
-}
-
-/// Wrapper for exporting multiple profiles as a single file.
-struct ProfileExportBundle: Codable {
-    var version: Int = 1
-    var entries: [ProfileExportEntry]
 }
