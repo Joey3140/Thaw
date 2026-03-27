@@ -55,8 +55,20 @@ final class MenuBarManager: ObservableObject {
     /// The panel that contains the Ice Bar interface.
     let iceBarPanel = IceBarPanel()
 
+    /// When set, the IceBar uses this screen-space X coordinate as its
+    /// anchor instead of the physical control item's position. Set by
+    /// the overlay panel when showing the IceBar from the virtual Thaw icon.
+    var iceBarAnchorOverride: CGFloat?
+
+    /// The tag of the menu bar item that currently has its menu open.
+    /// Set by the overlay's click handler, cleared when the menu closes.
+    @Published var activeMenuItemTag: MenuBarItemTag?
+
     /// The panel that contains the menu bar search interface.
     let searchPanel = MenuBarSearchPanel()
+
+    /// The overlay panel that covers hidden menu bar items.
+    let itemOverlayPanel = MenuBarItemOverlayPanel()
 
     /// The popover that contains a portable version of the menu bar
     /// appearance editor interface
@@ -82,6 +94,8 @@ final class MenuBarManager: ObservableObject {
         iceBarPanel.performSetup(with: appState)
         searchPanel.performSetup(with: appState)
         appearanceEditorPanel.performSetup(with: appState)
+        itemOverlayPanel.performSetup(with: appState)
+        itemOverlayPanel.performSetup(with: appState)
         for section in sections {
             section.performSetup(with: appState)
         }

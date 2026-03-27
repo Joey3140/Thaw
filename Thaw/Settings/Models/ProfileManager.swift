@@ -17,6 +17,11 @@ final class ProfileManager: ObservableObject {
     /// The ID of the currently active profile, or `nil`.
     @Published var activeProfileID: UUID?
 
+    /// The active profile's layout snapshot, used by the overlay panel to
+    /// render items in the profile's desired order. `nil` when no profile
+    /// is active (items render in macOS's default order).
+    @Published var activeLayout: MenuBarLayoutSnapshot?
+
     private let diagLog = DiagLog(category: "ProfileManager")
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -30,10 +35,12 @@ final class ProfileManager: ObservableObject {
     private var focusFilterActive = false
     /// The in-flight layout apply task. Exposed for callers that need to
     /// wait for the layout to finish (e.g. the Apply button).
-    private(set) var layoutTask: Task<Void, Never>?
+    /// Legacy: previously tracked physical move tasks. Kept as a no-op
+    /// property so external guards (`layoutTask == nil`) compile without
+    /// changes to every call site.
+    let layoutTask: Task<Void, Never>? = nil
 
     /// Generation counter to prevent older layout tasks from clearing newer ones.
-    private var layoutGeneration: UInt = 0
 
     /// Hotkeys for switching to each profile, keyed by profile ID.
     @Published private(set) var profileHotkeys: [UUID: Hotkey] = [:]
@@ -67,6 +74,8 @@ final class ProfileManager: ObservableObject {
         loadManifest()
     }
 
+    private static let lastActiveProfileKey = "LastActiveProfileID"
+
     /// Sets up the manager with the app state and configures auto-switch.
     /// If the current display has an associated profile, it is applied
     /// after the menu bar has settled.
@@ -74,6 +83,18 @@ final class ProfileManager: ObservableObject {
         self.appState = appState
         lastActiveDisplayUUID = Bridging.getActiveMenuBarDisplayUUID()
         rebuildProfileHotkeys()
+
+        // Persist the active profile ID whenever it changes.
+        $activeProfileID
+            .removeDuplicates()
+            .sink { id in
+                if let id {
+                    UserDefaults.standard.set(id.uuidString, forKey: Self.lastActiveProfileKey)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: Self.lastActiveProfileKey)
+                }
+            }
+            .store(in: &cancellables)
 
         // Rebuild profile hotkeys when the profile list changes.
         $profiles
@@ -132,6 +153,10 @@ final class ProfileManager: ObservableObject {
             // No Focus Filter — fall back to display-based profile.
             if let currentUUID = lastActiveDisplayUUID {
                 await self.applyProfileForDisplay(uuid: currentUUID)
+            }
+            // If no display-linked profile matched, restore the last active profile.
+            if self.activeProfileID == nil {
+                await self.restoreLastActiveProfile()
             }
         }
     }
@@ -210,29 +235,53 @@ final class ProfileManager: ObservableObject {
             forKey: .menuBarItemCustomNames
         ) as? [String: String] ?? [:]
 
-        // Capture per-item section assignments and ordering from the live cache.
-        // This is the primary source of truth — it handles apps like Control Center
-        // that share a single bundle ID across many items (WiFi, Battery, etc.).
-        var itemSectionMap = [String: String]()
-        var itemOrder = [String: [String]]()
-        let cache = appState.itemManager.itemCache
-        for section in MenuBarSection.Name.allCases {
-            let sectionKey: String
-            switch section {
-            case .visible: sectionKey = "visible"
-            case .hidden: sectionKey = "hidden"
-            case .alwaysHidden: sectionKey = "alwaysHidden"
+        // Use the active virtual layout if available (reflects drag-and-drop
+        // changes in the layout pane). Fall back to the physical item cache.
+        var itemSectionMap: [String: String]
+        var itemOrder: [String: [String]]
+
+        if let active = activeLayout,
+           let activeSectionMap = active.itemSectionMap, !activeSectionMap.isEmpty
+        {
+            itemSectionMap = activeSectionMap
+            itemOrder = active.itemOrder ?? [:]
+
+            // Add any new items (not in the active layout) from the cache.
+            let cache = appState.itemManager.itemCache
+            for section in MenuBarSection.Name.allCases {
+                let sectionKey: String = switch section {
+                case .visible: "visible"
+                case .hidden: "hidden"
+                case .alwaysHidden: "alwaysHidden"
+                }
+                for item in cache.managedItems(for: section) {
+                    let uid = item.uniqueIdentifier
+                    if itemSectionMap[uid] == nil {
+                        itemSectionMap[uid] = sectionKey
+                        itemOrder[sectionKey, default: []].append(uid)
+                    }
+                }
             }
-            var orderedIDs = [String]()
-            for item in cache.managedItems(for: section)
-                where item.canBeHidden || item.isControlItem
-            {
-                let uid = item.uniqueIdentifier
-                itemSectionMap[uid] = sectionKey
-                orderedIDs.append(uid)
-            }
-            if !orderedIDs.isEmpty {
-                itemOrder[sectionKey] = orderedIDs
+        } else {
+            // No active layout — capture from the physical item cache.
+            itemSectionMap = [:]
+            itemOrder = [:]
+            let cache = appState.itemManager.itemCache
+            for section in MenuBarSection.Name.allCases {
+                let sectionKey: String = switch section {
+                case .visible: "visible"
+                case .hidden: "hidden"
+                case .alwaysHidden: "alwaysHidden"
+                }
+                var orderedIDs = [String]()
+                for item in cache.managedItems(for: section) {
+                    let uid = item.uniqueIdentifier
+                    itemSectionMap[uid] = sectionKey
+                    orderedIDs.append(uid)
+                }
+                if !orderedIDs.isEmpty {
+                    itemOrder[sectionKey] = orderedIDs
+                }
             }
         }
 
@@ -314,29 +363,10 @@ final class ProfileManager: ObservableObject {
             forKey: .menuBarItemCustomNames
         )
 
-        // Cancel any in-flight layout task before starting a new one.
-        // Prevents two profile applies from fighting over item positions.
-        layoutTask?.cancel()
-
-        let pinnedHidden = Set(profile.menuBarLayout.pinnedHiddenBundleIDs)
-        let pinnedAlwaysHidden = Set(profile.menuBarLayout.pinnedAlwaysHiddenBundleIDs)
-        let sectionOrder = profile.menuBarLayout.savedSectionOrder
-        let itemSectionMap = profile.menuBarLayout.itemSectionMap ?? [:]
-        let itemOrder = profile.menuBarLayout.itemOrder ?? [:]
-        layoutGeneration &+= 1
-        let generation = layoutGeneration
-        layoutTask = Task { [weak self] in
-            await appState.itemManager.applyProfileLayout(
-                pinnedHidden: pinnedHidden,
-                pinnedAlwaysHidden: pinnedAlwaysHidden,
-                sectionOrder: sectionOrder,
-                itemSectionMap: itemSectionMap,
-                itemOrder: itemOrder
-            )
-            if self?.layoutGeneration == generation {
-                self?.layoutTask = nil
-            }
-        }
+        // Store the layout snapshot — the overlay panel uses this to render
+        // items in the profile's desired order. No physical moves needed.
+        activeLayout = profile.menuBarLayout
+        diagLog.info("applyProfile: stored layout with \(profile.menuBarLayout.itemOrder?.values.flatMap { $0 }.count ?? 0) ordered items")
     }
 
     /// Deletes a profile by its identifier.
@@ -608,6 +638,25 @@ final class ProfileManager: ObservableObject {
     }
 
     /// Applies the profile associated with the given display UUID, if any.
+    /// Restores the last active profile from UserDefaults when no
+    /// display-linked or Focus Filter profile is available.
+    private func restoreLastActiveProfile() async {
+        guard let idString = UserDefaults.standard.string(forKey: Self.lastActiveProfileKey),
+              let profileID = UUID(uuidString: idString),
+              profiles.contains(where: { $0.id == profileID }),
+              let appState
+        else { return }
+
+        diagLog.info("Restoring last active profile \(idString)")
+        do {
+            let profile = try loadProfile(id: profileID)
+            activeProfileID = profileID
+            applyProfile(profile, to: appState)
+        } catch {
+            diagLog.error("Failed to restore last active profile: \(error)")
+        }
+    }
+
     private func applyProfileForDisplay(uuid: String) async {
         guard let meta = profiles.first(where: { $0.associatedDisplayUUID == uuid }) else {
             return

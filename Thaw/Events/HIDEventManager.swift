@@ -647,7 +647,15 @@ extension HIDEventManager {
                 else {
                     return
                 }
-                hiddenSection.show()
+                // Show always-hidden section if the setting is enabled.
+                if appState.settings.general.showAlwaysHiddenOnHover,
+                   let alwaysHidden = appState.menuBarManager.section(withName: .alwaysHidden),
+                   alwaysHidden.isEnabled
+                {
+                    alwaysHidden.show()
+                } else {
+                    hiddenSection.show()
+                }
             }
         } else {
             guard
@@ -952,7 +960,21 @@ extension HIDEventManager {
             return false
         }
 
-        // Then perform expensive Window Server checks.
+        // When the overlay panel is visible, its empty area (the Spacer
+        // region left of rendered items) counts as empty menu bar space.
+        // Skip Window Server checks for the overlay region since physical
+        // items underneath are irrelevant.
+        let overlay = appState.menuBarManager.itemOverlayPanel
+        if overlay.isVisible, let mouseLocation = MouseHelpers.locationAppKit,
+           overlay.frame.contains(mouseLocation)
+        {
+            // Inside the overlay — only the empty area (Spacer) triggers hover.
+            // The icon area and app menus don't count as empty space.
+            return overlay.isMouseInsideEmptyArea()
+                && !isMouseInsideApplicationMenu(appState: appState, screen: screen)
+        }
+
+        // Outside the overlay — use standard Window Server checks.
         return !isMouseInsideApplicationMenu(appState: appState, screen: screen)
             && !isMouseInsideMenuBarItem(appState: appState, screen: screen)
             && !isMouseInsideIceIcon(appState: appState)
@@ -972,18 +994,22 @@ extension HIDEventManager {
     }
 
     /// A Boolean value that indicates whether the mouse pointer is within
-    /// the bounds of the Ice icon.
+    /// the bounds of the virtual Thaw icon rendered by the overlay panel.
     func isMouseInsideIceIcon(appState: AppState) -> Bool {
-        guard
-            let visibleSection = appState.menuBarManager.section(
-                withName: .visible
-            ),
-            let iceIconFrame = visibleSection.controlItem.frame,
-            let mouseLocation = MouseHelpers.locationAppKit
+        guard let mouseLocation = MouseHelpers.locationAppKit,
+              let midX = appState.menuBarManager.itemOverlayPanel.thawIconMidX
         else {
             return false
         }
-        return iceIconFrame.contains(mouseLocation)
+        let overlay = appState.menuBarManager.itemOverlayPanel
+        // Approximate the Thaw icon bounds from its midX and the panel's vertical bounds.
+        let iconRect = CGRect(
+            x: midX - 10,
+            y: overlay.frame.minY,
+            width: 20,
+            height: overlay.frame.height
+        )
+        return iconRect.contains(mouseLocation)
     }
 }
 

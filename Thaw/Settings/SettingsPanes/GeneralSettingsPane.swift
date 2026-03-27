@@ -15,15 +15,12 @@ struct GeneralSettingsPane: View {
     @State private var isImportingCustomIceIcon = false
     @State private var isPresentingError = false
     @State private var presentedError: LocalizedErrorWrapper?
-    @State private var isApplyingItemSpacingOffset = false
-    @State private var tempItemSpacingOffset: CGFloat = 0
-
     private var itemSpacingOffsetKey: LocalizedStringKey {
-        switch tempItemSpacingOffset {
+        switch settings.itemSpacingOffset {
         case -16: "none"
         case 0: "default"
         case 16: "max"
-        default: LocalizedStringKey(tempItemSpacingOffset.formatted())
+        default: LocalizedStringKey(settings.itemSpacingOffset.formatted())
         }
     }
 
@@ -180,6 +177,11 @@ struct GeneralSettingsPane: View {
         }
         Toggle("Show on hover", isOn: $settings.showOnHover)
             .annotation("Hover over an empty area of the menu bar to show hidden menu bar items.")
+
+        if settings.showOnHover {
+            Toggle("Show always-hidden on hover", isOn: $settings.showAlwaysHiddenOnHover)
+                .annotation("Hovering shows always-hidden items instead of just hidden items.")
+        }
         Toggle("Show on scroll", isOn: $settings.showOnScroll)
             .annotation("Scroll or swipe in the menu bar to show hidden menu bar items.")
     }
@@ -233,68 +235,24 @@ struct GeneralSettingsPane: View {
         LabeledContent {
             IceSlider(
                 itemSpacingOffsetKey,
-                value: $tempItemSpacingOffset,
+                value: $settings.itemSpacingOffset,
                 in: -16 ... 16,
                 step: 2
             )
-            .disabled(isApplyingItemSpacingOffset)
         } label: {
             LabeledContent {
-                Button("Apply") {
-                    applyTempItemSpacingOffset()
+                Button {
+                    settings.itemSpacingOffset = 0
+                } label: {
+                    Image(systemName: "arrow.counterclockwise.circle.fill")
                 }
-                .help(Text("Apply the current spacing"))
-                .disabled(isApplyingItemSpacingOffset || tempItemSpacingOffset == settings.itemSpacingOffset)
-
-                if isApplyingItemSpacingOffset {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .scaleEffect(0.5)
-                        .frame(width: 15, height: 15)
-                } else {
-                    Button {
-                        tempItemSpacingOffset = 0
-                        applyTempItemSpacingOffset()
-                    } label: {
-                        Image(systemName: "arrow.counterclockwise.circle.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .help(Text("Reset to the default spacing"))
-                    .disabled(isApplyingItemSpacingOffset || settings.itemSpacingOffset == 0)
-                }
+                .buttonStyle(.borderless)
+                .help(Text("Reset to the default spacing"))
+                .disabled(settings.itemSpacingOffset == 0)
             } label: {
-                HStack {
-                    Text("Menu bar item spacing")
-                    BetaBadge()
-                }
+                Text("Menu bar item spacing")
             }
         }
-        .annotation(
-            "Applying this setting will relaunch all apps with menu bar items. Some apps may need to be manually relaunched.",
-            spacing: 2
-        )
-        .annotation(spacing: 10) {
-            CalloutBox(
-                "Note: You may need to log out and back in for this setting to apply properly.",
-                systemImage: "exclamationmark.circle"
-            )
-        }
-        .onAppear {
-            tempItemSpacingOffset = settings.itemSpacingOffset
-        }
-    }
-
-    private func applyTempItemSpacingOffset() {
-        isApplyingItemSpacingOffset = true
-        settings.itemSpacingOffset = tempItemSpacingOffset
-        Task {
-            do {
-                try await appState.spacingManager.applyOffset()
-            } catch {
-                let alert = NSAlert(error: error)
-                alert.runModal()
-            }
-            isApplyingItemSpacingOffset = false
-        }
+        .annotation("Adjusts the spacing between icons in the virtual menu bar.")
     }
 }

@@ -74,7 +74,9 @@ final class LayoutBarItemView: NSView {
         super.init(frame: CGRect(origin: .zero, size: item.bounds.size))
         unregisterDraggedTypes()
 
-        self.isEnabled = item.isMovable
+        // All items are draggable in the layout pane since the overlay
+        // renders virtually — no physical move restrictions apply.
+        self.isEnabled = true
 
         configureCancellables()
     }
@@ -117,22 +119,72 @@ final class LayoutBarItemView: NSView {
         var c = Set<AnyCancellable>()
 
         if let appState {
-            let tag = item.tag
-            let imageForTag = appState.imageCache.$images
-                .map { images -> MenuBarItemImageCache.CapturedImage? in images[tag] }
-
-            imageForTag
-                .removeDuplicates(by: MenuBarItemImageCache.CapturedImage.isVisuallyEqual)
-                .sink { [weak self] image in
-                    guard let self else {
-                        return
+            if item.tag == .visibleControlItem {
+                // The Thaw icon is virtual — generate its image from settings.
+                appState.settings.general.$iceIcon
+                    .combineLatest(appState.settings.general.$customIceIconIsTemplate)
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] _, _ in
+                        self?.updateThawIconImage()
                     }
-                    self.cachedImage = image
-                }
-                .store(in: &c)
+                    .store(in: &c)
+                updateThawIconImage()
+            } else {
+                let tag = item.tag
+                let imageForTag = appState.imageCache.$images
+                    .map { images -> MenuBarItemImageCache.CapturedImage? in images[tag] }
+
+                imageForTag
+                    .removeDuplicates(by: MenuBarItemImageCache.CapturedImage.isVisuallyEqual)
+                    .sink { [weak self] image in
+                        guard let self else {
+                            return
+                        }
+                        self.cachedImage = image
+                    }
+                    .store(in: &c)
+            }
         }
 
         cancellables = c
+    }
+
+    /// Updates the image for the synthetic Thaw icon item.
+    private func updateThawIconImage() {
+        guard let appState else { return }
+        let icon = appState.settings.general.iceIcon
+        var image = icon.hidden.nsImage(for: appState)
+        if case .custom = icon.name, let original = image {
+            let w = original.size.width
+            let h = original.size.height
+            let ratio = max(w / 25, h / 17)
+            image = original.resized(to: CGSize(width: w / ratio, height: h / ratio))
+        }
+        guard let nsImage = image else { return }
+
+        // Template images render black when converted to CGImage.
+        // Draw into an NSImage with white tint to match how SwiftUI
+        // renders them in the settings pane (white on dark background).
+        let rendered: NSImage
+        if nsImage.isTemplate {
+            rendered = NSImage(size: nsImage.size, flipped: false) { rect in
+                nsImage.draw(in: rect)
+                NSColor.white.set()
+                rect.fill(using: .sourceAtop)
+                return true
+            }
+        } else {
+            rendered = nsImage
+        }
+
+        guard let cgImage = rendered.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        // The CGImage from NSImage.cgImage() is at the NSImage's point size.
+        // Use scale=1 so CapturedImage.scaledSize matches the actual dimensions.
+        let captured = MenuBarItemImageCache.CapturedImage(
+            cgImage: cgImage,
+            scale: 1.0
+        )
+        self.cachedImage = captured
     }
 
     /// Provides an alert to display when the item view is disabled.

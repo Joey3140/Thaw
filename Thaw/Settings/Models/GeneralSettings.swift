@@ -65,6 +65,10 @@ final class GeneralSettings: ObservableObject {
     /// empty area of the menu bar.
     @Published var showOnHover = Defaults.DefaultValue.showOnHover
 
+    /// A Boolean value that indicates whether hovering should show
+    /// always-hidden items instead of just hidden items.
+    @Published var showAlwaysHiddenOnHover = Defaults.DefaultValue.showAlwaysHiddenOnHover
+
     /// A Boolean value that indicates whether the hidden section
     /// should be shown or hidden when the user scrolls in the
     /// menu bar.
@@ -113,6 +117,7 @@ final class GeneralSettings: ObservableObject {
         Defaults.ifPresent(key: .showOnClick, assign: &showOnClick)
         Defaults.ifPresent(key: .showOnDoubleClick, assign: &showOnDoubleClick)
         Defaults.ifPresent(key: .showOnHover, assign: &showOnHover)
+        Defaults.ifPresent(key: .showAlwaysHiddenOnHover, assign: &showAlwaysHiddenOnHover)
         Defaults.ifPresent(key: .showOnScroll, assign: &showOnScroll)
         Defaults.ifPresent(key: .itemSpacingOffset, assign: &itemSpacingOffset)
         Defaults.ifPresent(key: .autoRehide, assign: &autoRehide)
@@ -223,6 +228,13 @@ final class GeneralSettings: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { showOnHover in
                 Defaults.set(showOnHover, forKey: .showOnHover)
+            }
+            .store(in: &c)
+
+        $showAlwaysHiddenOnHover
+            .receive(on: DispatchQueue.main)
+            .sink { value in
+                Defaults.set(value, forKey: .showAlwaysHiddenOnHover)
             }
             .store(in: &c)
 

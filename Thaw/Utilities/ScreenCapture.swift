@@ -73,12 +73,96 @@ enum ScreenCapture {
         }
     }
 
-    // MARK: Capture Window(s)
+    // MARK: - Content Snapshot
 
-    /// Captures a composite image of an array of windows.
+    /// A snapshot of the system's shareable content for batching ScreenCaptureKit operations.
     ///
-    /// The windows are composited from front to back, according to the order
-    /// of the `windowIDs` parameter.
+    /// Create one snapshot per capture batch to avoid repeated `SCShareableContent` queries.
+    struct ContentSnapshot {
+        private let windowMap: [CGWindowID: SCWindow]
+        private let displayMap: [CGDirectDisplayID: SCDisplay]
+
+        init() async throws {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: false
+            )
+            windowMap = Dictionary(
+                content.windows.map { ($0.windowID, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            displayMap = Dictionary(
+                content.displays.map { ($0.displayID, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            diagLog.debug("ContentSnapshot: indexed \(windowMap.count) windows, \(displayMap.count) displays")
+        }
+
+        /// Returns the `SCWindow` for the given window ID, if found.
+        func scWindow(for windowID: CGWindowID) -> SCWindow? {
+            windowMap[windowID]
+        }
+
+        /// Returns the `SCDisplay` for the given display ID, if found.
+        func scDisplay(for displayID: CGDirectDisplayID) -> SCDisplay? {
+            displayMap[displayID]
+        }
+    }
+
+    // MARK: - ScreenCaptureKit Capture
+
+    /// Captures an image of a single window on a specific display using ScreenCaptureKit.
+    ///
+    /// Uses `SCContentFilter(display:includingWindows:)` with a `sourceRect` to
+    /// capture the window as it appears on the display, at exactly the specified bounds.
+    /// This avoids the sizing issues of `desktopIndependentWindow`.
+    ///
+    /// - Parameters:
+    ///   - scWindow: The `SCWindow` to capture.
+    ///   - display: The `SCDisplay` the window is on.
+    ///   - sourceRect: The area to capture in display coordinates.
+    /// - Returns: The captured image, or `nil` on failure.
+    /// Captures an image of a single window on a specific display.
+    ///
+    /// Uses `SCContentFilter(display:includingWindows:)` with `sourceRect`
+    /// to capture the window as it appears on the display. Output dimensions
+    /// are determined automatically by `captureResolution = .best`.
+    static func captureWindow(
+        _ scWindow: SCWindow,
+        on display: SCDisplay,
+        sourceRect: CGRect
+    ) async -> CGImage? {
+        do {
+            let filter = SCContentFilter(display: display, including: [scWindow])
+            let config = SCStreamConfiguration()
+            config.showsCursor = false
+            config.captureResolution = .best
+            // Convert screen coordinates to display-local coordinates.
+            let displayBounds = CGDisplayBounds(display.displayID)
+            config.sourceRect = CGRect(
+                x: sourceRect.origin.x - displayBounds.origin.x,
+                y: sourceRect.origin.y - displayBounds.origin.y,
+                width: sourceRect.width,
+                height: sourceRect.height
+            )
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: config
+            )
+            diagLog.debug("captureWindow(display): ✓ windowID=\(scWindow.windowID) → \(image.width)×\(image.height)px")
+            return image
+        } catch {
+            diagLog.warning("captureWindow(display): SCK error for windowID=\(scWindow.windowID): \(error)")
+            return nil
+        }
+    }
+
+    // MARK: - Legacy CGWindowList Capture
+
+    /// Captures a composite image of an array of windows using the legacy CGWindowList API.
+    ///
+    /// Used by color-sampling callers (MenuBarManager, IceBarColorManager, etc.)
+    /// that need composite capture with specific screen bounds.
     ///
     /// - Parameters:
     ///   - windowIDs: The identifiers of the windows to capture.
@@ -92,19 +176,17 @@ enum ScreenCapture {
         }
         let bounds = screenBounds ?? .null
         let boundsDesc = bounds.isNull ? "null (auto)" : String(format: "(%.0f,%.0f %.0fx%.0f)", bounds.origin.x, bounds.origin.y, bounds.width, bounds.height)
-        diagLog.debug("captureWindows: bounds=\(boundsDesc), windowCount=\(windowIDs.count), options=\(option.rawValue)")
-        // ScreenCaptureKit doesn't support capturing images of offscreen menu bar
-        // items, so we unfortunately have to use the deprecated CGWindowList API.
+        diagLog.debug("captureWindows(legacy): bounds=\(boundsDesc), windowCount=\(windowIDs.count), options=\(option.rawValue)")
         let image = CGImage(windowListFromArrayScreenBounds: bounds, windowArray: array as CFArray, imageOption: option)
         if let image {
-            diagLog.debug("captureWindows: ✓ captured \(windowIDs.count) windows → \(image.width)×\(image.height)px")
+            diagLog.debug("captureWindows(legacy): ✓ captured \(windowIDs.count) windows → \(image.width)×\(image.height)px")
         } else {
-            diagLog.warning("captureWindows: CGImage(windowListFromArrayScreenBounds:) returned nil for \(windowIDs.count) windows (IDs: \(windowIDs.prefix(5)))")
+            diagLog.warning("captureWindows(legacy): returned nil for \(windowIDs.count) windows (IDs: \(windowIDs.prefix(5)))")
         }
         return image
     }
 
-    /// Captures an image of a window.
+    /// Captures an image of a window using the legacy CGWindowList API.
     ///
     /// - Parameters:
     ///   - windowID: The identifier of the window to capture.

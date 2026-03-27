@@ -37,11 +37,18 @@ struct GeneralSettingsSnapshot: Codable {
     var showOnClick: Bool
     var showOnDoubleClick: Bool
     var showOnHover: Bool
+    // Optional for backwards compatibility with profiles saved before this field existed.
+    var showAlwaysHiddenOnHover: Bool?
     var showOnScroll: Bool
     var itemSpacingOffset: Double
     var autoRehide: Bool
     var rehideStrategyRawValue: Int
     var rehideInterval: TimeInterval
+
+    /// Resolved value with default fallback for older profiles.
+    var resolvedShowAlwaysHiddenOnHover: Bool {
+        showAlwaysHiddenOnHover ?? Defaults.DefaultValue.showAlwaysHiddenOnHover
+    }
 
     @MainActor
     static func capture(from settings: GeneralSettings) -> GeneralSettingsSnapshot {
@@ -57,6 +64,7 @@ struct GeneralSettingsSnapshot: Codable {
             showOnClick: settings.showOnClick,
             showOnDoubleClick: settings.showOnDoubleClick,
             showOnHover: settings.showOnHover,
+            showAlwaysHiddenOnHover: settings.showAlwaysHiddenOnHover,
             showOnScroll: settings.showOnScroll,
             itemSpacingOffset: settings.itemSpacingOffset,
             autoRehide: settings.autoRehide,
@@ -78,6 +86,7 @@ struct GeneralSettingsSnapshot: Codable {
         settings.showOnClick = showOnClick
         settings.showOnDoubleClick = showOnDoubleClick
         settings.showOnHover = showOnHover
+        settings.showAlwaysHiddenOnHover = resolvedShowAlwaysHiddenOnHover
         settings.showOnScroll = showOnScroll
         settings.itemSpacingOffset = itemSpacingOffset
         settings.autoRehide = autoRehide
@@ -262,6 +271,7 @@ struct Profile: Codable, Identifiable {
             showOnClick: Defaults.DefaultValue.showOnClick,
             showOnDoubleClick: Defaults.DefaultValue.showOnDoubleClick,
             showOnHover: Defaults.DefaultValue.showOnHover,
+            showAlwaysHiddenOnHover: Defaults.DefaultValue.showAlwaysHiddenOnHover,
             showOnScroll: Defaults.DefaultValue.showOnScroll,
             itemSpacingOffset: Defaults.DefaultValue.itemSpacingOffset,
             autoRehide: Defaults.DefaultValue.autoRehide,

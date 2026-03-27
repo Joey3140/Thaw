@@ -153,6 +153,7 @@ extension Defaults {
         static let showOnClick = true
         static let showOnDoubleClick = true
         static let showOnHover = false
+        static let showAlwaysHiddenOnHover = false
         static let showOnScroll = true
         static let itemSpacingOffset: Double = 0
         static let autoRehide = true
@@ -200,6 +201,7 @@ extension Defaults {
         case showOnClick = "ShowOnClick"
         case showOnDoubleClick = "ShowOnDoubleClick"
         case showOnHover = "ShowOnHover"
+        case showAlwaysHiddenOnHover = "ShowAlwaysHiddenOnHover"
         case showOnScroll = "ShowOnScroll"
         case autoRehide = "AutoRehide"
         case rehideStrategy = "RehideStrategy"

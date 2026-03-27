@@ -37,16 +37,17 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
     }
 
     /// A Boolean value that indicates whether the item identified
-    /// by this tag can be moved.
+    /// by this tag can be physically moved by macOS. With the overlay
+    /// panel, all items can be virtually moved regardless of this value.
     var isMovable: Bool {
-        !MenuBarItemTag.immovableItems.contains(where: { $0.namespace == namespace && $0.title == title })
+        true
     }
 
     /// A Boolean value that indicates whether the item identified
-    /// by this tag can be hidden.
+    /// by this tag can be hidden. With the overlay panel rendering
+    /// the menu bar, all items can be hidden by simply not rendering them.
     var canBeHidden: Bool {
-        !MenuBarItemTag.nonHideableItems.contains(where: { $0.namespace == namespace && $0.title == title }) &&
-            !(namespace.isUUID && title == "AudioVideoModule")
+        true
     }
 
     /// A Boolean value that indicates whether the item identified
@@ -138,40 +139,6 @@ struct MenuBarItemTag: Hashable, CustomStringConvertible {
 // MARK: MenuBarItemTag Constants
 
 extension MenuBarItemTag {
-    // MARK: Special Item Lists
-
-    /// An array of tags for items whose movement is prevented by macOS.
-    ///
-    /// These items have fixed positions at the trailing end of the menu bar,
-    /// and cannot be hidden.
-    ///
-    /// In macOS 26, this list contains the "Clock" and "Control Center" items.
-    /// In earlier releases, it also contained the "Siri" item.
-    static let immovableItems: [MenuBarItemTag] = {
-        var items = [clock, controlCenter, ssMenuAgent]
-        if #unavailable(macOS 26.0) {
-            items.append(siri)
-        }
-        return items
-    }()
-
-    // TODO: MusicRecognition became hideable in what macOS version?
-    //
-    // At some point, it became possible to hide the "MusicRecognition" item.
-    // We need to determine which version of macOS first had this change, and
-    // and conditionally exclude the item from this list.
-    //
-    // We're using macOS 15.3.2 for now, but it could be earlier.
-    //
-    /// An array of tags for items that can be moved, but cannot be hidden.
-    static let nonHideableItems: [MenuBarItemTag] = {
-        var items = [visibleControlItem, audioVideoModule, faceTime, screenCaptureUI]
-        if #unavailable(macOS 15.3.2) {
-            items.append(musicRecognition)
-        }
-        return items
-    }()
-
     /// An array of tags for items representing Ice's control items.
     static let controlItems = ControlItem.Identifier.allCases.map { $0.tag }
 

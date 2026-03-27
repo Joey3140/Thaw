@@ -82,14 +82,17 @@ final class LayoutBarContainer: NSView {
         var c = Set<AnyCancellable>()
 
         if let appState {
-            appState.itemManager.$itemCache
-                .sink { [weak self] cache in
-                    guard let self else {
-                        return
-                    }
-                    setArrangedViews(items: cache.managedItems(for: section))
-                }
-                .store(in: &c)
+            // Update items when the cache or active profile layout changes.
+            Publishers.CombineLatest(
+                appState.itemManager.$itemCache,
+                appState.profileManager.$activeLayout
+            )
+            .sink { [weak self] cache, layout in
+                guard let self else { return }
+                let items = self.resolveItems(from: cache, layout: layout)
+                setArrangedViews(items: items)
+            }
+            .store(in: &c)
 
             appState.imageCache.$images
                 .debounce(for: .milliseconds(50), scheduler: DispatchQueue.main)
@@ -103,6 +106,78 @@ final class LayoutBarContainer: NSView {
         }
 
         cancellables = c
+    }
+
+    /// Returns items for this section, applying profile-based section
+    /// assignment and ordering when a profile is active.
+    private func resolveItems(
+        from cache: MenuBarItemManager.ItemCache,
+        layout: MenuBarLayoutSnapshot?
+    ) -> [MenuBarItem] {
+        guard let layout, let sectionMap = layout.itemSectionMap, !sectionMap.isEmpty else {
+            // No profile — use position-based section detection.
+            var items = cache.managedItems(for: section)
+            if section == .visible {
+                items.insert(MenuBarItem.syntheticThawIcon(), at: 0)
+            }
+            return items
+        }
+
+        // Profile active — assign items to sections using itemSectionMap.
+        // The visible control item is rendered virtually by the overlay.
+        let allItems = cache.managedItems.filter { !$0.isControlItem }
+        let sectionKey: String = switch section {
+        case .visible: "visible"
+        case .hidden: "hidden"
+        case .alwaysHidden: "alwaysHidden"
+        }
+
+        var sectionItems = allItems.filter { item in
+            let assigned = sectionMap[item.uniqueIdentifier]
+            if let assigned {
+                return assigned == sectionKey
+            }
+            // Unassigned items default to visible section.
+            return section == .visible
+        }
+
+        // Sort by profile's itemOrder if available.
+        if let itemOrder = layout.itemOrder,
+           let order = itemOrder[sectionKey], !order.isEmpty
+        {
+            let orderMap: [String: Int] = Dictionary(
+                order.enumerated().map { ($0.element, $0.offset) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            sectionItems.sort { a, b in
+                // Unassigned items get Int.min so they appear at the left
+                // (near the Thaw icon), not at the right (near the clock).
+                let posA = orderMap[a.uniqueIdentifier] ?? Int.min
+                let posB = orderMap[b.uniqueIdentifier] ?? Int.min
+                return posA < posB
+            }
+        }
+
+        // Inject a synthetic Thaw icon item at its profile-ordered position
+        // in the visible section. The physical control item no longer exists
+        // in the cache, so we create a virtual placeholder.
+        if section == .visible {
+            let thawUID = "\(Constants.bundleIdentifier):\(ControlItem.Identifier.visible.rawValue)"
+            if let itemOrder = layout.itemOrder,
+               let visibleOrder = itemOrder["visible"],
+               let thawOrderIdx = visibleOrder.firstIndex(of: thawUID)
+            {
+                let syntheticThaw = MenuBarItem.syntheticThawIcon()
+                let itemsBefore = visibleOrder[0..<thawOrderIdx].filter { $0 != thawUID }
+                let insertIdx = min(itemsBefore.count, sectionItems.count)
+                sectionItems.insert(syntheticThaw, at: insertIdx)
+            } else if sectionMap[thawUID] == "visible" || sectionMap[thawUID] == nil {
+                // No explicit order — insert at the start.
+                sectionItems.insert(MenuBarItem.syntheticThawIcon(), at: 0)
+            }
+        }
+
+        return sectionItems
     }
 
     /// Performs layout of the container's arranged views.

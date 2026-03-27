@@ -96,11 +96,6 @@ final class MenuBarItemImageCache: ObservableObject {
         qos: .background
     )
 
-    /// Image capture options.
-    private let captureOption: CGWindowImageOption = [
-        .boundsIgnoreFraming, .bestResolution,
-    ]
-
     /// The shared app state.
     private weak var appState: AppState?
 
@@ -423,126 +418,16 @@ final class MenuBarItemImageCache: ObservableObject {
 
     // MARK: Capturing Images
 
-    /// Captures a composite image of the given items, then crops out an image
-    /// for each item and returns the result.
+    /// Captures images of the given menu bar items individually.
     ///
-    /// Accepts pre-fetched window bounds alongside each item to avoid a
-    /// redundant `getWindowBounds` system call and eliminate the TOCTOU race
-    /// where a window could move between bounds lookup and composite capture.
-    /// All items passed to this function are expected to be on-screen;
-    /// off-screen items should be pre-filtered by the caller.
-    private nonisolated func compositeCapture(
-        _ itemsWithBounds: [(item: MenuBarItem, bounds: CGRect)],
-        scale: CGFloat
-    ) -> CaptureResult {
-        var result = CaptureResult()
-
-        var windowIDs = [CGWindowID]()
-        var storage = [CGWindowID: (MenuBarItem, CGRect)]()
-        var boundsUnion = CGRect.null
-
-        for (item, bounds) in itemsWithBounds {
-            windowIDs.append(item.windowID)
-            storage[item.windowID] = (item, bounds)
-            boundsUnion = boundsUnion.union(bounds)
-        }
-
-        // Defensive guard: callers pre-filter empty arrays, but this protects
-        // against future misuse.
-        guard !windowIDs.isEmpty else {
-            return result
-        }
-
-        let compositeImage = ScreenCapture.captureWindows(
-            with: windowIDs,
-            option: captureOption
-        )
-
-        guard let compositeImage else {
-            MenuBarItemImageCache.diagLog.warning("compositeCapture: ScreenCapture.captureWindows returned nil for \(windowIDs.count) windows")
-            result.excluded = itemsWithBounds.map(\.item)
-            return result
-        }
-
-        let expectedWidth = boundsUnion.width * scale
-        let actualWidth = CGFloat(compositeImage.width)
-        guard actualWidth == expectedWidth else {
-            MenuBarItemImageCache.diagLog.warning("compositeCapture: width mismatch — expected \(expectedWidth) (boundsUnion.width=\(boundsUnion.width) * scale=\(scale)) but got \(actualWidth). Image dimensions: \(compositeImage.width)x\(compositeImage.height)")
-            result.excluded = itemsWithBounds.map(\.item)
-            return result
-        }
-
-        guard !compositeImage.isTransparent() else {
-            MenuBarItemImageCache.diagLog.warning("compositeCapture: composite image is fully transparent (\(compositeImage.width)x\(compositeImage.height)) — screen recording permission may not be effective")
-            result.excluded = itemsWithBounds.map(\.item)
-            return result
-        }
-
-        MenuBarItemImageCache.diagLog.debug(
-            "compositeCapture: composite image OK (\(compositeImage.width)x\(compositeImage.height)), cropping \(windowIDs.count) items"
-        )
-
-        // Crop out each item from the composite.
-        var cropSuccessCount = 0
-        var cropNilCount = 0
-        var cropTransparentCount = 0
-        for windowID in windowIDs {
-            guard let (item, bounds) = storage[windowID] else {
-                continue
-            }
-
-            // Check if this item should be skipped due to repeated failures
-            if shouldSkipCapture(for: item) {
-                MenuBarItemImageCache.diagLog.debug(
-                    "Skipping composite capture for repeatedly failing item: \(item.logString)"
-                )
-                result.excluded.append(item)
-                continue
-            }
-
-            let cropRect = CGRect(
-                x: (bounds.origin.x - boundsUnion.origin.x) * scale,
-                y: (bounds.origin.y - boundsUnion.origin.y) * scale,
-                width: bounds.width * scale,
-                height: bounds.height * scale
-            )
-
-            let croppedImage = compositeImage.cropping(to: cropRect)
-            guard let croppedImage else {
-                cropNilCount += 1
-                recordCaptureFailure(for: item)
-                result.excluded.append(item)
-                continue
-            }
-            guard !croppedImage.isTransparent() else {
-                cropTransparentCount += 1
-                recordCaptureFailure(for: item)
-                result.excluded.append(item)
-                continue
-            }
-
-            // Record success
-            cropSuccessCount += 1
-            recordCaptureSuccess(for: item)
-            result.images[item.tag] = CapturedImage(
-                cgImage: croppedImage,
-                scale: scale
-            )
-        }
-
-        MenuBarItemImageCache.diagLog.debug(
-            "compositeCapture: crops done — \(cropSuccessCount) ok, \(cropNilCount) nil, \(cropTransparentCount) transparent"
-        )
-
-        return result
-    }
-
-    /// Captures an image of each of the given items individually, then
-    /// returns the result.
-    private nonisolated func individualCapture(
+    /// Uses the CGWindowList API for reliable per-window capture.
+    /// Items are on-screen (with `ControlItem.Lengths.expanded = 1`)
+    /// so individual capture works for all sections.
+    private nonisolated func captureItemImages(
         _ items: [MenuBarItem],
         scale: CGFloat
     ) -> CaptureResult {
+        let captureOption: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
         var result = CaptureResult()
         var capturedCount = 0
         var nilImageCount = 0
@@ -550,23 +435,16 @@ final class MenuBarItemImageCache: ObservableObject {
         var skippedCount = 0
 
         for item in items {
-            // Check if this item should be skipped due to repeated failures
             if shouldSkipCapture(for: item) {
-                MenuBarItemImageCache.diagLog.debug(
-                    "Skipping capture for repeatedly failing item: \(item.logString)"
-                )
                 skippedCount += 1
                 result.excluded.append(item)
                 continue
             }
 
-            let image = ScreenCapture.captureWindow(
+            guard let image = ScreenCapture.captureWindow(
                 with: item.windowID,
                 option: captureOption
-            )
-
-            guard let image else {
-                MenuBarItemImageCache.diagLog.debug("individualCapture: captureWindow returned nil for \(item.logString)")
+            ) else {
                 nilImageCount += 1
                 recordCaptureFailure(for: item)
                 result.excluded.append(item)
@@ -574,23 +452,21 @@ final class MenuBarItemImageCache: ObservableObject {
             }
 
             guard !image.isTransparent() else {
-                MenuBarItemImageCache.diagLog.debug("individualCapture: captured image is transparent for \(item.logString) (\(image.width)x\(image.height))")
                 transparentCount += 1
                 recordCaptureFailure(for: item)
                 result.excluded.append(item)
                 continue
             }
 
-            // Record success and cache
             capturedCount += 1
             recordCaptureSuccess(for: item)
-            result.images[item.tag] = CapturedImage(
-                cgImage: image,
-                scale: scale
-            )
+            result.images[item.tag] = CapturedImage(cgImage: image, scale: scale)
         }
 
-        MenuBarItemImageCache.diagLog.debug("individualCapture: \(items.count) items -> \(capturedCount) captured, \(nilImageCount) nil, \(transparentCount) transparent, \(skippedCount) skipped (blacklisted)")
+        MenuBarItemImageCache.diagLog.debug(
+            "captureItemImages: \(items.count) items → \(capturedCount) captured, \(nilImageCount) nil, \(transparentCount) transparent, \(skippedCount) skipped"
+        )
+
         return result
     }
 
@@ -600,99 +476,15 @@ final class MenuBarItemImageCache: ObservableObject {
         scale: CGFloat,
         appState: AppState
     ) async -> CaptureResult {
-        // Thaw's own control items always capture as transparent via
-        // CGWindowListCreateImage, so skip them to avoid the perpetual
-        // fail -> blacklist -> cooldown -> retry cycle.
         let capturable = items.filter { !$0.isControlItem }
+        guard !capturable.isEmpty else { return CaptureResult() }
 
-        // Use individual capture after a move operation, since composite capture
-        // doesn't account for overlapping items.
-        if await appState.itemManager.lastMoveOperationOccurred(
-            within: .seconds(2)
-        ) {
-            MenuBarItemImageCache.diagLog.debug("Capturing individually due to recent item movement")
-            return individualCapture(capturable, scale: scale)
-        }
-
-        // Pre-filter off-screen items: hidden section items are positioned past
-        // the right edge of the screen. Including them in compositeCapture
-        // inflates boundsUnion → CGWindowListCreateImageFromArray returns an
-        // image narrower than expected → width mismatch → the whole composite
-        // fails for ALL items. Off-screen items are captured by the live refresh
-        // loop (refreshImages) instead, so we can safely skip them here.
-        //
-        // Note: isWindowOnScreen() cannot be used for this — macOS incorrectly
-        // reports hidden menu bar items as on-screen (known macOS behaviour).
-        let displayID = Bridging.getActiveMenuBarDisplayID() ?? CGMainDisplayID()
-        let screenFrame = await MainActor.run {
-            NSScreen.screens.first { $0.displayID == displayID }?.frame
-        }
-
-        // Fetch window bounds once for all items. This single pass is reused for
-        // both the off-screen filter and the subsequent compositeCapture, avoiding
-        // a redundant system call and eliminating the TOCTOU race where a window
-        // could move between the two lookups.
-        var onScreenItemsWithBounds: [(item: MenuBarItem, bounds: CGRect)] = []
-        var offScreenCount = 0
-        var nilBoundsCount = 0
-
-        for item in capturable {
-            guard let bounds = Bridging.getWindowBounds(for: item.windowID) else {
-                // Window bounds unavailable — skip; neither composite nor
-                // individual capture can succeed without position info.
-                nilBoundsCount += 1
-                continue
-            }
-            if let screenFrame, !screenFrame.intersects(bounds) {
-                offScreenCount += 1
-            } else {
-                onScreenItemsWithBounds.append((item: item, bounds: bounds))
-            }
-        }
-
-        if nilBoundsCount > 0 {
-            MenuBarItemImageCache.diagLog.debug(
-                "captureImages: \(nilBoundsCount)/\(capturable.count) items had no bounds, skipped"
-            )
-        }
-        if offScreenCount > 0 {
-            MenuBarItemImageCache.diagLog.debug(
-                "captureImages: \(offScreenCount)/\(capturable.count) off-screen items skipped (live refresh handles them)"
-            )
-        }
-
-        guard !onScreenItemsWithBounds.isEmpty else {
-            MenuBarItemImageCache.diagLog.debug(
-                "captureImages: no on-screen items to capture for this section"
-            )
-            return CaptureResult()
-        }
-
-        let compositeResult = compositeCapture(onScreenItemsWithBounds, scale: scale)
-
-        if compositeResult.excluded.isEmpty {
-            return compositeResult // All items captured successfully.
-        }
-
-        MenuBarItemImageCache.diagLog.debug(
-            "\(compositeResult.excluded.count)/\(onScreenItemsWithBounds.count) items excluded from composite, retrying individually"
-        )
-
-        var individualResult = individualCapture(
-            compositeResult.excluded,
-            scale: scale
-        )
-
-        // Merge the successfully captured images from each result. Keep excluded
-        // items as part of the result, so they can be logged elsewhere.
-        individualResult.images.merge(compositeResult.images) { _, new in new }
-
-        return individualResult
+        return captureItemImages(capturable, scale: scale)
     }
 
-    /// Lightweight image refresh for the IceBar.
+    /// Lightweight image refresh for the IceBar, search, and layout settings.
     ///
-    /// Performs a single composite capture and crops individual items.
+    /// Captures each item individually using ScreenCaptureKit.
     /// Updates LRU access timestamps for refreshed images to keep them
     /// consistent with the `images` dict (preventing LRU inconsistencies),
     /// but skips full cache management (LRU eviction, failure tracking,
@@ -702,57 +494,16 @@ final class MenuBarItemImageCache: ObservableObject {
         of items: [MenuBarItem],
         scale: CGFloat
     ) async {
-        var windowIDs = [CGWindowID]()
-        var storage = [CGWindowID: (MenuBarItem, CGRect)]()
-        var boundsUnion = CGRect.null
+        guard !items.isEmpty else { return }
+
+        let captureOption: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
+        var newImages = [MenuBarItemTag: CapturedImage]()
 
         for item in items {
-            guard let bounds = Bridging.getWindowBounds(for: item.windowID) else {
-                continue
-            }
-            windowIDs.append(item.windowID)
-            storage[item.windowID] = (item, bounds)
-            boundsUnion = boundsUnion.union(bounds)
-        }
-
-        guard !windowIDs.isEmpty else {
-            MenuBarItemImageCache.diagLog.debug("refreshImages: no items with bounds, skipping")
-            return
-        }
-
-        guard let compositeImage = ScreenCapture.captureWindows(
-            with: windowIDs,
-            option: captureOption
-        ) else {
-            MenuBarItemImageCache.diagLog.debug("refreshImages: capture failed, skipping")
-            return
-        }
-
-        let expectedWidth = boundsUnion.width * scale
-        guard CGFloat(compositeImage.width) == expectedWidth else {
-            MenuBarItemImageCache.diagLog.debug("refreshImages: width mismatch (expected \(expectedWidth), got \(compositeImage.width)), skipping")
-            return
-        }
-
-        guard !compositeImage.isTransparent() else {
-            MenuBarItemImageCache.diagLog.debug("refreshImages: composite is transparent, skipping")
-            return
-        }
-
-        var newImages = [MenuBarItemTag: CapturedImage]()
-        for windowID in windowIDs {
-            guard let (item, bounds) = storage[windowID] else { continue }
-            let cropRect = CGRect(
-                x: (bounds.origin.x - boundsUnion.origin.x) * scale,
-                y: (bounds.origin.y - boundsUnion.origin.y) * scale,
-                width: bounds.width * scale,
-                height: bounds.height * scale
-            )
-            // No per-item isTransparent() here: the composite-level check
-            // above already rejects fully-transparent captures. Individual
-            // transparent crops are intentional spacers. Failure tracking
-            // lives in compositeCapture/individualCapture only.
-            guard let image = compositeImage.cropping(to: cropRect) else {
+            guard let image = ScreenCapture.captureWindow(
+                with: item.windowID,
+                option: captureOption
+            ), !image.isTransparent() else {
                 continue
             }
             newImages[item.tag] = CapturedImage(cgImage: image, scale: scale)

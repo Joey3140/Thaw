@@ -39,6 +39,7 @@ extension AppSettings {
         general.showOnClick = Defaults.DefaultValue.showOnClick
         general.showOnDoubleClick = Defaults.DefaultValue.showOnDoubleClick
         general.showOnHover = Defaults.DefaultValue.showOnHover
+        general.showAlwaysHiddenOnHover = Defaults.DefaultValue.showAlwaysHiddenOnHover
         general.showOnScroll = Defaults.DefaultValue.showOnScroll
         general.itemSpacingOffset = Defaults.DefaultValue.itemSpacingOffset
         general.autoRehide = Defaults.DefaultValue.autoRehide

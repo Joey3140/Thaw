@@ -141,17 +141,24 @@ final class IceBarPanel: NSPanel {
                 let lowerBound = screen.frame.minX
                 let upperBound = screen.frame.maxX - frame.width
 
-                guard
-                    lowerBound <= upperBound,
-                    let controlItem = appState.itemManager.itemCache.managedItems.first(matching: .visibleControlItem),
-                    // Bridging API is more reliable than controlItem.frame in some
-                    // cases (like if the item is offscreen).
-                    let itemBounds = Bridging.getWindowBounds(for: controlItem.windowID)
-                else {
+                guard lowerBound <= upperBound else {
                     return originForRightOfScreen
                 }
 
-                return CGPoint(x: (itemBounds.midX - frame.width / 2).clamped(to: lowerBound ... upperBound), y: defaultOriginY)
+                // Use the overlay's anchor override if set, otherwise
+                // fall back to the physical control item's position.
+                // Use the overlay's anchor point for the virtual Thaw icon.
+                // The physical visible control item no longer exists.
+                if let anchorX = appState.menuBarManager.iceBarAnchorOverride {
+                    return CGPoint(x: (anchorX - frame.width / 2).clamped(to: lowerBound ... upperBound), y: defaultOriginY)
+                }
+
+                // Fallback: use the overlay panel's Thaw icon position.
+                if let anchorX = appState.menuBarManager.itemOverlayPanel.thawIconMidX {
+                    return CGPoint(x: (anchorX - frame.width / 2).clamped(to: lowerBound ... upperBound), y: defaultOriginY)
+                }
+
+                return originForRightOfScreen
             }
         }
 
@@ -233,6 +240,7 @@ final class IceBarPanel: NSPanel {
         orderOut(nil)
         super.close()
         currentSection = nil
+        appState?.menuBarManager.iceBarAnchorOverride = nil
         appState?.navigationState.isIceBarPresented = false
     }
 }
@@ -294,7 +302,14 @@ private struct IceBarContentView: View {
     let section: MenuBarSection.Name
 
     private var items: [MenuBarItem] {
-        itemManager.itemCache.managedItems(for: section)
+        // Use the overlay's resolved section assignments when available.
+        // This handles both profile-based and position-based detection
+        // correctly, since the overlay already resolves sections properly.
+        let overlayItems = menuBarManager.itemOverlayPanel.resolvedSections[section]
+        if let overlayItems, !overlayItems.isEmpty {
+            return overlayItems
+        }
+        return itemManager.itemCache.managedItems(for: section)
     }
 
     private var configuration: MenuBarAppearanceConfigurationV2 {

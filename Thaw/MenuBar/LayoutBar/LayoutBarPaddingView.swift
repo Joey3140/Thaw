@@ -150,101 +150,47 @@ final class LayoutBarPaddingView: NSView {
         return true
     }
 
+    /// Updates the virtual layout instead of physically moving the item.
+    /// The overlay panel and layout pane both observe `profileManager.activeLayout`
+    /// and will re-render with the new order.
     private func move(item: MenuBarItem, to destination: MenuBarItemManager.MoveDestination) {
         guard let appState = container.appState else {
+            container.canSetArrangedViews = true
             return
         }
-        Task {
-            guard !isStabilizing else { return }
-            isStabilizing = true
-            await MainActor.run { self.showOverlay(true) }
-            try await Task.sleep(for: .milliseconds(25))
 
-            let watchdogTask = Task { [weak self, weak appState] in
-                guard let duration = self?.layoutWatchdogDuration() else { return }
-                try? await Task.sleep(for: duration + .seconds(1))
-                guard let self, !Task.isCancelled else { return }
-                await MainActor.run {
-                    if self.isStabilizing {
-                        self.isStabilizing = false
-                        self.showOverlay(false)
-                        self.container.canSetArrangedViews = true
-                    }
-                }
-                guard let appState else { return }
-                await appState.itemManager.cacheItemsRegardless(skipRecentMoveCheck: true)
-                await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
-            }
-            do {
-                try await appState.itemManager.move(
-                    item: item,
-                    to: destination,
-                    skipInputPause: true,
-                    watchdogTimeout: MenuBarItemManager.layoutWatchdogTimeout
-                )
-                appState.itemManager.removeTemporarilyShownItemFromCache(with: item.tag)
-                await stabilizePlacement(of: item, to: destination, expectedSection: container.section, appState: appState)
-            } catch {
-                Self.diagLog.error("Error moving menu bar item: \(error)")
-                let alert = NSAlert(error: error)
-                alert.runModal()
-            }
-            watchdogTask.cancel()
-            if let appState = container.appState {
-                await appState.itemManager.cacheItemsRegardless(skipRecentMoveCheck: true)
-            }
-            await MainActor.run {
-                self.isStabilizing = false
-                self.showOverlay(false)
-                // Re-enable view updates now that stabilization is complete,
-                // and force a refresh since updates were blocked during the move.
-                self.container.canSetArrangedViews = true
-                if let appState = self.container.appState {
-                    let items = appState.itemManager.itemCache.managedItems(for: self.container.section)
-                    self.container.setArrangedViews(items: items)
-                }
-            }
-        }
-    }
-
-    private func showOverlay(_ visible: Bool) {
-        container.alphaValue = visible ? 0.6 : 1.0
-    }
-
-    /// Ensures the dragged item remains in the intended section and its icon appears.
-    private func stabilizePlacement(
-        of item: MenuBarItem,
-        to destination: MenuBarItemManager.MoveDestination,
-        expectedSection: MenuBarSection.Name,
-        appState: AppState
-    ) async {
-        // First refresh caches and verify placement.
-        await appState.itemManager.cacheItemsRegardless(skipRecentMoveCheck: true)
-
-        func isInExpectedSection() -> Bool {
-            appState.itemManager.itemCache[expectedSection].contains { $0.tag == item.tag }
+        // Build the new order from the current arranged views in this container.
+        let currentOrder = container.arrangedViews.map(\.item.uniqueIdentifier)
+        let targetSection = container.section
+        let sectionKey: String = switch targetSection {
+        case .visible: "visible"
+        case .hidden: "hidden"
+        case .alwaysHidden: "alwaysHidden"
         }
 
-        if !isInExpectedSection() {
-            // Allow macOS a brief moment to settle, then retry once.
-            try? await Task.sleep(for: .milliseconds(120))
-            do {
-                try await appState.itemManager.move(
-                    item: item,
-                    to: destination,
-                    skipInputPause: true,
-                    watchdogTimeout: MenuBarItemManager.layoutWatchdogTimeout
-                )
-                await appState.itemManager.cacheItemsRegardless(skipRecentMoveCheck: true)
-            } catch {
-                Self.diagLog.error("Stabilize move failed: \(error)")
-            }
-        }
+        // Update or create the active layout.
+        var layout = appState.profileManager.activeLayout ?? MenuBarLayoutSnapshot(
+            savedSectionOrder: [:],
+            pinnedHiddenBundleIDs: [],
+            pinnedAlwaysHiddenBundleIDs: [],
+            customNames: [:]
+        )
 
-        // Refresh images so icons show immediately in the UI without clearing to avoid temporary gaps.
-        await MainActor.run {
-            appState.imageCache.performCacheCleanup()
-        }
-        await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+        // Update the item order for this section.
+        var itemOrder = layout.itemOrder ?? [:]
+        itemOrder[sectionKey] = currentOrder
+        layout.itemOrder = itemOrder
+
+        // Update the section map for the moved item.
+        var sectionMap = layout.itemSectionMap ?? [:]
+        sectionMap[item.uniqueIdentifier] = sectionKey
+        layout.itemSectionMap = sectionMap
+
+        // Publish the updated layout — overlay and layout pane will re-render.
+        appState.profileManager.activeLayout = layout
+
+        Self.diagLog.debug("Virtual move: \(item.logString) → \(sectionKey), order: \(currentOrder.count) items")
+
+        container.canSetArrangedViews = true
     }
 }

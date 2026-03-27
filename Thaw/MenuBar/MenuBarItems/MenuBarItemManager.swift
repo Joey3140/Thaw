@@ -693,16 +693,15 @@ extension MenuBarItemManager {
         }
 
         func isValidForCaching(_ item: MenuBarItem) -> Bool {
-            if item.tag == .visibleControlItem {
-                return true
-            }
-            if !item.canBeHidden {
+            // The visible control item no longer has a physical status item —
+            // it's rendered virtually by the overlay panel.
+            if item.isControlItem {
                 return false
             }
+            // Non-hideable items (screen capture indicator, etc.) are still
+            // cached so the overlay panel can render them. They just can't
+            // be moved to hidden/alwaysHidden sections.
             if item.isSystemClone {
-                return false
-            }
-            if item.isControlItem, item.tag != .visibleControlItem {
                 return false
             }
             return true
@@ -2479,10 +2478,9 @@ extension MenuBarItemManager {
             return
         }
 
-        // Prefer inserting to the left of the Thaw/visible control item so the icon appears
-        // where users expect. If it's missing, fall back to the first non-control item.
-        let visibleControl = items.first(matching: .visibleControlItem)
-        let targetItem = visibleControl ?? items.first(where: { !$0.isControlItem && $0.canBeHidden }) ?? items.first
+        // The visible control item is virtual (no physical status item).
+        // Insert to the left of the first non-control item.
+        let targetItem = items.first(where: { !$0.isControlItem && $0.canBeHidden }) ?? items.first
 
         // If we couldn't find any anchor, bail gracefully.
         guard let anchor = targetItem else {
@@ -2894,32 +2892,15 @@ extension MenuBarItemManager {
         let hiddenBounds = bestBounds(for: controlItems.hidden)
         let leftmostItems = items
             .filter {
-                // Must be left of hidden divider, movable.
-                // Include normal items AND the Thaw icon (which is a control item).
+                // Must be left of hidden divider, movable, not a control item.
                 $0.bounds.maxX <= hiddenBounds.minX &&
                     $0.isMovable &&
-                    (!$0.isControlItem || $0.tag == .visibleControlItem)
+                    !$0.isControlItem
             }
             .sorted { $0.bounds.minX < $1.bounds.minX }
 
         guard !leftmostItems.isEmpty else {
             return false
-        }
-
-        // The Thaw icon must always appear in the visible section.
-        if let thawIcon = leftmostItems.first(where: { $0.tag == .visibleControlItem }) {
-            MenuBarItemManager.diagLog.info("Relocating Thaw icon \(thawIcon.logString) to visible section")
-            do {
-                try await move(
-                    item: thawIcon,
-                    to: .rightOfItem(controlItems.hidden),
-                    skipInputPause: true
-                )
-            } catch {
-                MenuBarItemManager.diagLog.error("Failed to relocate Thaw icon \(thawIcon.logString): \(error)")
-                return false
-            }
-            return true
         }
 
         // Non-hideable system items (screen recording, mic, camera indicators)
@@ -3760,10 +3741,6 @@ extension MenuBarItemManager {
         func movePass(_ items: [MenuBarItem], anchor: MenuBarItem) async -> Int {
             var failed = 0
             for item in items {
-                if item.tag == .visibleControlItem {
-                    continue // Keep the Thaw icon in the visible section if enabled.
-                }
-
                 guard item.isMovable, item.canBeHidden, !item.isControlItem else {
                     continue
                 }
@@ -3813,9 +3790,7 @@ extension MenuBarItemManager {
             }
 
             let notYetInHidden = refreshedItems.filter { item in
-                guard item.isMovable, item.canBeHidden, !item.isControlItem,
-                      item.tag != .visibleControlItem
-                else {
+                guard item.isMovable, item.canBeHidden, !item.isControlItem else {
                     return false
                 }
                 let bounds = Bridging.getWindowBounds(for: item.windowID) ?? item.bounds
@@ -3980,7 +3955,7 @@ extension MenuBarItemManager {
         ]
 
         func isProfileItem(_ item: MenuBarItem) -> Bool {
-            (item.canBeHidden || item.tag == .visibleControlItem) && item.isMovable
+            item.canBeHidden && item.isMovable
                 && item.tag != .screenCaptureUI
                 && item.tag != .audioVideoModule
                 && item.tag != .faceTime

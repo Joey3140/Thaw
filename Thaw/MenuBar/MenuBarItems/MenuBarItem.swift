@@ -221,6 +221,39 @@ struct MenuBarItem: CustomStringConvertible {
         self.title = itemWindow.title
         self.isOnScreen = itemWindow.isOnScreen
     }
+
+    /// Creates a synthetic Thaw icon item for the Layout Bar.
+    /// The visible control item no longer has a physical `NSStatusItem`,
+    /// so this placeholder represents it in the layout settings UI.
+    static func syntheticThawIcon() -> MenuBarItem {
+        MenuBarItem(
+            tag: .visibleControlItem,
+            windowID: 0,
+            ownerPID: ProcessInfo.processInfo.processIdentifier,
+            sourcePID: ProcessInfo.processInfo.processIdentifier,
+            bounds: .zero,
+            title: "Thaw",
+            isOnScreen: true
+        )
+    }
+
+    private init(
+        tag: MenuBarItemTag,
+        windowID: CGWindowID,
+        ownerPID: pid_t,
+        sourcePID: pid_t?,
+        bounds: CGRect,
+        title: String?,
+        isOnScreen: Bool
+    ) {
+        self.tag = tag
+        self.windowID = windowID
+        self.ownerPID = ownerPID
+        self.sourcePID = sourcePID
+        self.bounds = bounds
+        self.title = title
+        self.isOnScreen = isOnScreen
+    }
 }
 
 // MARK: - MenuBarItem List

@@ -56,7 +56,10 @@ final class ControlItem {
     /// A namespace for control item lengths.
     private enum Lengths {
         static let standard: CGFloat = NSStatusItem.variableLength
-        static let expanded: CGFloat = 10000
+        /// Small non-zero width keeps items on-screen for image capture
+        /// while providing clear section boundaries for `findSection()`.
+        /// The shield panel prevents clicks from reaching actual items.
+        static let expanded: CGFloat = 1
     }
 
     /// Storage for a control item's underlying status item.
@@ -135,7 +138,11 @@ final class ControlItem {
     let identifier: Identifier
 
     /// Lazy storage for the control item's underlying status item.
-    private lazy var storage = StatusItemStorage(controlItem: self)
+    /// Not created for the visible control item (rendered by the overlay).
+    private lazy var storage: StatusItemStorage? = {
+        guard identifier != .visible else { return nil }
+        return StatusItemStorage(controlItem: self)
+    }()
 
     /// Spacer items used to extend hidden/always-hidden width on ultra-wide displays.
     private var spacerItems = [NSStatusItem]()
@@ -147,13 +154,14 @@ final class ControlItem {
     private var cancellables = Set<AnyCancellable>()
 
     /// The control item's underlying status item.
-    private var statusItem: NSStatusItem {
-        storage.statusItem
+    /// `nil` for the visible control item (rendered by the overlay).
+    private var statusItem: NSStatusItem? {
+        storage?.statusItem
     }
 
     /// A horizontal constraint for the control item's content view.
     private var constraint: NSLayoutConstraint? {
-        storage.constraint
+        storage?.constraint
     }
 
     /// A Boolean value that indicates whether the control item serves as
@@ -163,9 +171,11 @@ final class ControlItem {
     }
 
     /// A Boolean value that indicates whether the control item is currently
-    /// displayed in the menu bar.
+    /// displayed in the menu bar. The visible control item is always
+    /// considered "added" since the overlay renders it virtually.
     var isAddedToMenuBar: Bool {
-        statusItem.isVisible
+        if identifier == .visible { return true }
+        return statusItem?.isVisible ?? false
     }
 
     /// The corresponding section name for the control item.
@@ -192,114 +202,109 @@ final class ControlItem {
     private func configureCancellables() {
         var c = Set<AnyCancellable>()
 
-        $state
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.updateStatusItem()
+        // The visible control item has no physical status item —
+        // the overlay panel handles rendering and interaction.
+        // Only set up physical observers for hidden/alwaysHidden.
+        if identifier == .visible {
+            // Enable the hotkey immediately (visible section is always enabled).
+            if let menuBarManager = appState?.menuBarManager,
+               let section = menuBarManager.section(withName: sectionName),
+               let hotkey = section.hotkey
+            {
+                hotkey.enable()
             }
-            .store(in: &c)
+        }
 
-        statusItem.publisher(for: \.isVisible)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] isVisible in
-                guard
-                    let self,
-                    let menuBarManager = appState?.menuBarManager,
-                    let section = menuBarManager.section(withName: sectionName),
-                    let hotkey = section.hotkey
-                else {
-                    return
-                }
-                if isVisible {
-                    hotkey.enable()
-                } else {
-                    hotkey.disable()
-                }
-            }
-            .store(in: &c)
-
-        statusItem.publisher(for: \.button).removeNil()
-            .flatMap { $0.publisher(for: \.window) }
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] window in
-                self?.window = window
-            }
-            .store(in: &c)
-
-        $window.removeNil()
-            .flatMap { $0.publisher(for: \.frame) }
-            .removeDuplicates()
-            .debounce(for: 0.05, scheduler: DispatchQueue.main)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] frame in
-                self?.frame = frame
-            }
-            .store(in: &c)
-
-        $window.removeNil()
-            .flatMap { $0.publisher(for: \.screen) }
-            .debounce(for: 0.05, scheduler: DispatchQueue.main)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] screen in
-                self?.screen = screen
-            }
-            .store(in: &c)
-
-        $screen.removeNil()
-            .flatMap { $0.publisher(for: \.frame) }
-            .combineLatest($frame.removeNil())
-            .removeDuplicates()
-            .debounce(for: 0.05, scheduler: DispatchQueue.main)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] screenFrame, frame in
-                guard let self else {
-                    return
-                }
-                if screenFrame.intersects(frame) {
-                    onScreenFrame = frame
-                } else {
-                    onScreenFrame = nil
-                }
-            }
-            .store(in: &c)
-
-        if let appState {
-            appState.$isDraggingMenuBarItem
-                .removeDuplicates()
+        if let statusItem, identifier != .visible {
+            $state
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] isDragging in
-                    guard let self else {
+                .sink { [weak self] _ in
+                    self?.updateStatusItem()
+                }
+                .store(in: &c)
+
+            statusItem.publisher(for: \.isVisible)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] isVisible in
+                    guard
+                        let self,
+                        let menuBarManager = appState?.menuBarManager,
+                        let section = menuBarManager.section(withName: sectionName),
+                        let hotkey = section.hotkey
+                    else {
                         return
                     }
-                    if isDragging {
-                        updateStatusItem()
+                    if isVisible {
+                        hotkey.enable()
+                    } else {
+                        hotkey.disable()
                     }
                 }
                 .store(in: &c)
 
-            if identifier == .visible {
-                appState.settings.general.$showIceIcon
+            statusItem.publisher(for: \.button).removeNil()
+                .flatMap { $0.publisher(for: \.window) }
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] window in
+                    self?.window = window
+                }
+                .store(in: &c)
+
+            $window.removeNil()
+                .flatMap { $0.publisher(for: \.frame) }
+                .removeDuplicates()
+                .debounce(for: 0.05, scheduler: DispatchQueue.main)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] frame in
+                    self?.frame = frame
+                }
+                .store(in: &c)
+
+            $window.removeNil()
+                .flatMap { $0.publisher(for: \.screen) }
+                .debounce(for: 0.05, scheduler: DispatchQueue.main)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] screen in
+                    self?.screen = screen
+                }
+                .store(in: &c)
+
+            $screen.removeNil()
+                .flatMap { $0.publisher(for: \.frame) }
+                .combineLatest($frame.removeNil())
+                .removeDuplicates()
+                .debounce(for: 0.05, scheduler: DispatchQueue.main)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] screenFrame, frame in
+                    guard let self else {
+                        return
+                    }
+                    if screenFrame.intersects(frame) {
+                        onScreenFrame = frame
+                    } else {
+                        onScreenFrame = nil
+                    }
+                }
+                .store(in: &c)
+        }
+
+        if let appState {
+            if identifier != .visible {
+                appState.$isDraggingMenuBarItem
                     .removeDuplicates()
                     .receive(on: DispatchQueue.main)
-                    .sink { [weak self] shouldShow in
+                    .sink { [weak self] isDragging in
                         guard let self else {
                             return
                         }
-                        setIceIconDisplayed(shouldShow)
-                    }
-                    .store(in: &c)
-
-                appState.settings.general.$iceIcon
-                    .combineLatest(appState.settings.general.$customIceIconIsTemplate)
-                    .removeDuplicates()
-                    .receive(on: DispatchQueue.main)
-                    .sink { [weak self] _ in
-                        self?.updateStatusItem()
+                        if isDragging {
+                            updateStatusItem()
+                        }
                     }
                     .store(in: &c)
             }
 
-            if identifier == .alwaysHidden {
+            if identifier == .alwaysHidden, let statusItem {
                 appState.settings.advanced.$enableAlwaysHiddenSection
                     .combineLatest(statusItem.publisher(for: \.isVisible))
                     .removeDuplicates()
@@ -333,9 +338,12 @@ final class ControlItem {
 
     /// Updates the appearance of the status item using the current hiding state.
     private func updateStatusItem() {
+        // The visible control item is rendered by the overlay — no physical update needed.
+        guard identifier != .visible else { return }
+
         guard
             let appState,
-            let button = statusItem.button
+            let button = statusItem?.button
         else {
             return
         }
@@ -346,34 +354,7 @@ final class ControlItem {
 
         switch identifier {
         case .visible:
-            if !appState.settings.general.showIceIcon {
-                hideIceIconCompletely()
-                return
-            }
-            updateStatusItemVisibility(true)
-            button.appearsDisabled = false
-
-            let icon = appState.settings.general.iceIcon
-
-            // We can usually just create the image directly from the icon.
-            var image = switch state {
-            case .showSection: icon.visible.nsImage(for: appState)
-            case .hideSection: icon.hidden.nsImage(for: appState)
-            }
-
-            if
-                case .custom = icon.name,
-                let originalImage = image
-            {
-                // Custom icons need to be resized to fit inside the button.
-                let originalWidth = originalImage.size.width
-                let originalHeight = originalImage.size.height
-                let ratio = max(originalWidth / 25, originalHeight / 17)
-                let newSize = CGSize(width: originalWidth / ratio, height: originalHeight / ratio)
-                image = originalImage.resized(to: newSize)
-            }
-
-            button.image = image
+            break // Handled by overlay panel.
         case .hidden, .alwaysHidden:
             switch state {
             case .showSection:
@@ -412,7 +393,7 @@ final class ControlItem {
     /// view, update the item's length, then adjust the content size of the
     /// item's window if needed.
     private func updateStatusItemVisibility(_ isVisible: Bool) {
-        guard let appState else {
+        guard let appState, let statusItem, identifier != .visible else {
             return
         }
 
@@ -439,43 +420,11 @@ final class ControlItem {
         }
     }
 
-    /// Adds or removes spacer items to extend the hidden/always-hidden section width.
-    private func updateSpacerItems(forHiddenState isHiddenState: Bool) {
-        guard identifier != .visible else {
-            removeSpacerItems()
-            return
-        }
-
-        guard isHiddenState else {
-            removeSpacerItems()
-            return
-        }
-
-        let needed = requiredSpacerCount()
-
-        if spacerItems.count != needed {
-            removeSpacerItems()
-
-            spacerItems = (0 ..< needed).map { index in
-                let item = NSStatusBar.system.statusItem(withLength: 0)
-                item.autosaveName = "\(identifier.rawValue).Spacer.\(index)"
-
-                if let button = item.button {
-                    button.title = ""
-                    button.image = nil
-                    button.isEnabled = false
-                    button.appearsDisabled = true
-                    button.alphaValue = 0
-                }
-
-                return item
-            }
-        }
-
-        spacerItems.forEach { $0.length = Lengths.expanded }
+    /// Spacer items not needed with expanded=1.
+    private func updateSpacerItems(forHiddenState _: Bool) {
+        removeSpacerItems()
     }
 
-    /// Removes spacer items from the status bar.
     private func removeSpacerItems() {
         for item in spacerItems {
             NSStatusBar.system.removeStatusItem(item)
@@ -483,20 +432,9 @@ final class ControlItem {
         spacerItems.removeAll()
     }
 
-    /// Calculates how many spacer items are needed to push hidden items off ultra-wide displays.
-    private func requiredSpacerCount() -> Int {
-        let maxScreenWidth = NSScreen.screens.map { $0.frame.width }.max() ?? 6000
-        guard maxScreenWidth > 5120 else { return 0 }
-
-        let desiredWidth = maxScreenWidth * 3
-        let remaining = desiredWidth - Lengths.expanded
-        guard remaining > 0 else { return 0 }
-        return Int(ceil(remaining / Lengths.expanded))
-    }
-
     /// Adds the control item to the menu bar.
     private func addToMenuBar() {
-        guard !isAddedToMenuBar else {
+        guard identifier != .visible, let statusItem, !isAddedToMenuBar else {
             return
         }
         statusItem.isVisible = true
@@ -504,12 +442,9 @@ final class ControlItem {
 
     /// Removes the control item from the menu bar.
     private func removeFromMenuBar() {
-        guard isAddedToMenuBar else {
+        guard identifier != .visible, let statusItem, isAddedToMenuBar else {
             return
         }
-        // Setting `statusItem.isVisible` to `false` has the unwanted side
-        // effect of deleting the preferred position. Cache and restore it,
-        // but only for non-section-divider items.
         let autosaveName = statusItem.autosaveName as String
         let isSectionDivider = (identifier == .hidden || identifier == .alwaysHidden)
         let cached = ControlItemDefaults[.preferredPosition, autosaveName]
@@ -519,30 +454,10 @@ final class ControlItem {
         }
     }
 
-    /// Updates the status item's visibility without clearing its preferred position.
-    private func setIceIconDisplayed(_ shouldShow: Bool) {
-        statusItem.isVisible = true
-        if shouldShow {
-            updateStatusItem()
-            return
-        }
-
-        hideIceIconCompletely()
-    }
-
-    /// Hides the Ice icon without removing the status item or losing autosave data.
-    private func hideIceIconCompletely() {
-        constraint?.isActive = false
-        statusItem.length = 0
-
-        if let window {
-            let size = withMutableCopy(of: window.frame.size) { $0.width = 1 }
-            window.setContentSize(size)
-        }
-    }
-
     /// Performs the control item's action.
     @objc private func performAction() {
+        // The visible control item's clicks are handled by the overlay panel.
+        guard identifier != .visible else { return }
         guard
             let menuBarManager = appState?.menuBarManager,
             let event = NSApp.currentEvent
@@ -738,7 +653,7 @@ final class ControlItem {
 
     /// Shows the control item's menu.
     private func showMenu() {
-        guard let appState else {
+        guard let appState, let statusItem else {
             return
         }
         let menu = createMenu(with: appState)
