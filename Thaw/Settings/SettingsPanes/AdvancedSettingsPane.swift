@@ -47,6 +47,7 @@ struct AdvancedSettingsPane: View {
                 tooltipDelay
             }
             IceSection("Other") {
+                useLCSSortingOnNotchedDisplays
                 hideApplicationMenus
                 enableSecondaryContextMenu
                 showIceBarAtMouseLocationOnHotkey
@@ -113,6 +114,24 @@ struct AdvancedSettingsPane: View {
             ForEach(SectionDividerStyle.allCases) { style in
                 Text(style.localized).tag(style)
             }
+        }
+    }
+
+    private var useLCSSortingOnNotchedDisplays: some View {
+        Toggle(
+            "Use LCS sorting on notched displays",
+            isOn: $settings.useLCSSortingOnNotchedDisplays
+        )
+        .annotation {
+            Text(
+                """
+                Use the faster LCS (Longest Common Subsequence) algorithm for \
+                profile sorting on notched displays instead of the full sort. \
+                LCS minimises the number of moves but may be less reliable on \
+                notched displays with smaller resolutions.
+                """
+            )
+            .padding(.trailing, 75)
         }
     }
 
