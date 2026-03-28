@@ -922,31 +922,10 @@ extension MenuBarItemManager {
             hiddenControlItemWindowID: CGWindowID? = nil,
             alwaysHiddenControlItemWindowID: CGWindowID? = nil
         ) {
-            // Primary lookup: match by tag (namespace + title).
-            if let hidden = items.removeFirst(matching: .hiddenControlItem) {
-                self.hidden = hidden
-                self.alwaysHidden = items.removeFirst(matching: .alwaysHiddenControlItem)
-                return
-            }
-
-            // Fallback 1: match by sourcePID (our own process) + known title.
-            let ourPID = ProcessInfo.processInfo.processIdentifier
-            let hiddenTitle = ControlItem.Identifier.hidden.rawValue
-            let alwaysHiddenTitle = ControlItem.Identifier.alwaysHidden.rawValue
-
-            if let idx = items.firstIndex(where: { $0.sourcePID == ourPID && $0.title == hiddenTitle }) {
-                self.hidden = items.remove(at: idx)
-                if let ahIdx = items.firstIndex(where: { $0.sourcePID == ourPID && $0.title == alwaysHiddenTitle }) {
-                    self.alwaysHidden = items.remove(at: ahIdx)
-                } else {
-                    self.alwaysHidden = nil
-                }
-                return
-            }
-
-            // Fallback 2: match by known window IDs obtained from the ControlItem
-            // objects themselves. This handles the case where both the tag and the
-            // window title are unreliable on macOS 26.
+            // Primary lookup: match by known window IDs obtained from
+            // the ControlItem objects. This is the most reliable method
+            // as it does not depend on titles (which may be unavailable
+            // without screen recording permission).
             if let hiddenWID = hiddenControlItemWindowID,
                let idx = items.firstIndex(where: { $0.windowID == hiddenWID })
             {
@@ -954,6 +933,28 @@ extension MenuBarItemManager {
                 if let ahWID = alwaysHiddenControlItemWindowID,
                    let ahIdx = items.firstIndex(where: { $0.windowID == ahWID })
                 {
+                    self.alwaysHidden = items.remove(at: ahIdx)
+                } else {
+                    self.alwaysHidden = nil
+                }
+                return
+            }
+
+            // Fallback 1: match by tag (namespace + title).
+            if let hidden = items.removeFirst(matching: .hiddenControlItem) {
+                self.hidden = hidden
+                self.alwaysHidden = items.removeFirst(matching: .alwaysHiddenControlItem)
+                return
+            }
+
+            // Fallback 2: match by sourcePID (our own process) + known title.
+            let ourPID = ProcessInfo.processInfo.processIdentifier
+            let hiddenTitle = ControlItem.Identifier.hidden.rawValue
+            let alwaysHiddenTitle = ControlItem.Identifier.alwaysHidden.rawValue
+
+            if let idx = items.firstIndex(where: { $0.sourcePID == ourPID && $0.title == hiddenTitle }) {
+                self.hidden = items.remove(at: idx)
+                if let ahIdx = items.firstIndex(where: { $0.sourcePID == ourPID && $0.title == alwaysHiddenTitle }) {
                     self.alwaysHidden = items.remove(at: ahIdx)
                 } else {
                     self.alwaysHidden = nil
@@ -1196,11 +1197,9 @@ extension MenuBarItemManager {
             // fallback lookup in ControlItemPair can match by window ID when
             // the tag-based and title-based lookups fail (macOS 26+).
             let hiddenControlItemWID: CGWindowID? = appState?.menuBarManager
-                .controlItem(withName: .hidden)?.window
-                .flatMap { CGWindowID(exactly: $0.windowNumber) }
+                .controlItem(withName: .hidden)?.windowID
             let alwaysHiddenControlItemWID: CGWindowID? = appState?.menuBarManager
-                .controlItem(withName: .alwaysHidden)?.window
-                .flatMap { CGWindowID(exactly: $0.windowNumber) }
+                .controlItem(withName: .alwaysHidden)?.windowID
 
             guard let controlItems = ControlItemPair(
                 items: &items,
@@ -2231,7 +2230,7 @@ extension MenuBarItemManager {
 
             // Find the control item to use as anchor for recovery
             guard let appState else { return }
-            guard let hiddenControlItem = appState.menuBarManager.controlItem(withName: .hidden)?.window else {
+            guard let hiddenControlItemWID = appState.menuBarManager.controlItem(withName: .hidden)?.windowID else {
                 MenuBarItemManager.diagLog.error("Cannot recover item: missing hidden control item window")
                 return
             }
@@ -2239,7 +2238,7 @@ extension MenuBarItemManager {
             // Create a MenuBarItem representation of the control item for the destination
             // We need to find it in the current cache
             let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
-            guard let hiddenMenuBarItem = items.first(where: { $0.windowID == CGWindowID(hiddenControlItem.windowNumber) }) else {
+            guard let hiddenMenuBarItem = items.first(where: { $0.windowID == hiddenControlItemWID }) else {
                 MenuBarItemManager.diagLog.error("Cannot recover item: control item not found in menu bar items")
                 return
             }
@@ -4076,11 +4075,9 @@ extension MenuBarItemManager {
         var items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
 
         let hiddenWID: CGWindowID? = appState.menuBarManager
-            .controlItem(withName: .hidden)?.window
-            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+            .controlItem(withName: .hidden)?.windowID
         let alwaysHiddenWID: CGWindowID? = appState.menuBarManager
-            .controlItem(withName: .alwaysHidden)?.window
-            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+            .controlItem(withName: .alwaysHidden)?.windowID
 
         guard let controlItems = ControlItemPair(
             items: &items,
@@ -4167,11 +4164,9 @@ extension MenuBarItemManager {
         var refreshedItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
         var failedMoves = 0
         let refreshHiddenWID: CGWindowID? = appState.menuBarManager
-            .controlItem(withName: .hidden)?.window
-            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+            .controlItem(withName: .hidden)?.windowID
         let refreshAlwaysHiddenWID: CGWindowID? = appState.menuBarManager
-            .controlItem(withName: .alwaysHidden)?.window
-            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+            .controlItem(withName: .alwaysHidden)?.windowID
         if let refreshedControls = ControlItemPair(
             items: &refreshedItems,
             hiddenControlItemWindowID: refreshHiddenWID,
@@ -5049,11 +5044,9 @@ extension MenuBarItemManager {
 
         // Get window IDs from ControlItem objects
         let hiddenWID: CGWindowID? = appState.menuBarManager
-            .controlItem(withName: .hidden)?.window
-            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+            .controlItem(withName: .hidden)?.windowID
         let alwaysHiddenWID: CGWindowID? = appState.menuBarManager
-            .controlItem(withName: .alwaysHidden)?.window
-            .flatMap { CGWindowID(exactly: $0.windowNumber) }
+            .controlItem(withName: .alwaysHidden)?.windowID
 
         // Create ControlItemPair to get MenuBarItem representations
         guard let controlItems = ControlItemPair(
