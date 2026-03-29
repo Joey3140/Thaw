@@ -86,7 +86,7 @@ final class AppState: ObservableObject {
 
         diagLog.debug("setupTask: starting AppState setup sequence")
         permissions.stopAllChecks()
-        diagLog.debug("setupTask: permissions state = \(String(describing: self.permissions.permissionsState)), accessibility = \(self.permissions.accessibility.hasPermission), screenRecording = \(self.permissions.screenRecording.hasPermission)")
+        diagLog.debug("setupTask: permissions state = \(String(describing: self.permissions.permissionsState)), accessibility = \(self.permissions.accessibility.hasPermission)")
 
         settings.performSetup(with: self)
         menuBarManager.performSetup(with: self)
@@ -383,17 +383,6 @@ final class AppState: ObservableObject {
                     isRestarting = false
                 }
             }
-        }
-    }
-
-    /// Returns a Boolean value indicating whether the app has been
-    /// granted the permission associated with the given key.
-    func hasPermission(_ key: AppPermissions.PermissionKey) -> Bool {
-        switch key {
-        case .accessibility:
-            permissions.accessibility.hasPermission
-        case .screenRecording:
-            permissions.screenRecording.hasPermission
         }
     }
 
