@@ -335,6 +335,7 @@ private struct IconPickerView: View {
     @State private var icons: [(name: String, image: NSImage)] = []
     @State private var isLoading = true
     @State private var sfSymbolSearch = ""
+    @State private var monochrome = false
 
     private let columns = Array(repeating: GridItem(.fixed(32), spacing: 6), count: 7)
 
@@ -358,18 +359,27 @@ private struct IconPickerView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 6) {
                         ForEach(icons, id: \.name) { icon in
+                            let overrideValue = monochrome ? "mono:\(icon.name)" : icon.name
                             IconCell(
                                 name: icon.name,
                                 image: icon.image,
                                 isSelected: icon.name == currentOverride
+                                    || "mono:\(icon.name)" == currentOverride
                             ) {
-                                onSelect(icon.name)
+                                onSelect(overrideValue)
                             }
                         }
                     }
                     .padding(8)
                 }
             }
+
+            Divider()
+
+            Toggle("White fill", isOn: $monochrome)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .padding(.horizontal, 8)
 
             Divider()
 
@@ -386,7 +396,8 @@ private struct IconPickerView: View {
                         .frame(width: 20, height: 20)
 
                     Button("Use") {
-                        onSelect("sf:\(sfSymbolSearch)")
+                        let prefix = monochrome ? "mono:sf:" : "sf:"
+                        onSelect("\(prefix)\(sfSymbolSearch)")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -408,7 +419,7 @@ private struct IconPickerView: View {
             .disabled(currentOverride == nil)
             .padding(.bottom, 8)
         }
-        .frame(width: 280, height: 300)
+        .frame(width: 280, height: 340)
         .task {
             let url = bundleURL
             let result = await Task.detached(priority: .userInitiated) {
@@ -425,9 +436,16 @@ private struct IconPickerView: View {
             } else {
                 icons = result
             }
-            // Pre-fill SF Symbol field if current override is an SF Symbol.
-            if let current = currentOverride, current.hasPrefix("sf:") {
-                sfSymbolSearch = String(current.dropFirst(3))
+            // Restore state from current override.
+            if let current = currentOverride {
+                if current.hasPrefix("mono:") {
+                    monochrome = true
+                }
+                let stripped = current
+                    .replacingOccurrences(of: "mono:", with: "")
+                if stripped.hasPrefix("sf:") {
+                    sfSymbolSearch = String(stripped.dropFirst(3))
+                }
             }
             isLoading = false
         }

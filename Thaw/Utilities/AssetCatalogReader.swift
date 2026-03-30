@@ -165,12 +165,21 @@ enum AssetCatalogReader {
 
     // MARK: - Icon Resolution
 
-    /// Resolves an icon name to an NSImage. Supports two formats:
+    /// Resolves an icon name to an NSImage. Supports prefixes:
     /// - `"sf:symbol.name"` — loads an SF Symbol
+    /// - `"mono:resourceName"` — loads from bundle, rendered as white filled silhouette
     /// - `"resourceName"` — loads from the app bundle
+    ///
+    /// The `mono:` prefix draws the icon normally then tints all visible
+    /// pixels white, preserving the original shape including filled areas.
+    /// This differs from template rendering which may strip fills.
     private static func resolveIcon(_ name: String, bundle: Bundle, forceTemplate: Bool) -> (name: String, image: NSImage)? {
-        if name.hasPrefix("sf:") {
-            let symbolName = String(name.dropFirst(3))
+        // Strip mono: prefix — forces white-fill rendering.
+        let isMono = name.hasPrefix("mono:")
+        let resolvedName = isMono ? String(name.dropFirst(5)) : name
+
+        if resolvedName.hasPrefix("sf:") {
+            let symbolName = String(resolvedName.dropFirst(3))
             let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
             guard let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
                 .withSymbolConfiguration(config)
@@ -181,11 +190,16 @@ enum AssetCatalogReader {
             return (name, image)
         }
 
-        guard let image = bundle.image(forResource: name) else {
+        guard let image = bundle.image(forResource: resolvedName) else {
             return nil
         }
-        if forceTemplate
-            || name.lowercased().contains("template")
+
+        if isMono {
+            // Don't set isTemplate — we want the original pixel data preserved.
+            // The mono: flag is handled by renderNSImage which applies the
+            // white tint after drawing the full-color image.
+        } else if forceTemplate
+            || resolvedName.lowercased().contains("template")
             || image.isTemplate
         {
             image.isTemplate = true

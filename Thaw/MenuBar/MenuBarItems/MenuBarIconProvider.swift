@@ -48,7 +48,10 @@ enum MenuBarIconProvider {
             return nil
         }
 
-        guard let cgImage = renderNSImage(best.image, canvasSize: canvasSize, scale: scale) else {
+        // mono: override — draw the full-color icon then tint all pixels white.
+        let forceMono = best.name.hasPrefix("mono:")
+
+        guard let cgImage = renderNSImage(best.image, canvasSize: canvasSize, scale: scale, forceMono: forceMono) else {
             return nil
         }
 
@@ -176,14 +179,14 @@ enum MenuBarIconProvider {
         )
         let text = formatter.string(from: Date())
 
-        let font = NSFont.menuBarFont(ofSize: 0) // 0 = system default menu bar size
+        let font = NSFont.menuBarFont(ofSize: 0)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor.white,
         ]
 
         let textSize = (text as NSString).size(withAttributes: attrs)
-        let pixelW = Int(canvasSize.width * scale)
+        let pixelW = Int(ceil(textSize.width + 4) * scale)
         let pixelH = Int(canvasSize.height * scale)
 
         guard pixelW > 0, pixelH > 0 else { return nil }
@@ -200,15 +203,19 @@ enum MenuBarIconProvider {
             return nil
         }
 
+        // Scale the context so NSString.draw works in points, not pixels.
         let nsGraphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = nsGraphicsContext
+        context.scaleBy(x: scale, y: scale)
 
-        // Center the text vertically, align left with a small inset.
-        let drawX = 2 * scale
-        let drawY = (CGFloat(pixelH) - textSize.height * scale) / 2
-        let drawRect = NSRect(x: drawX, y: drawY, width: textSize.width * scale, height: textSize.height * scale)
-        (text as NSString).draw(in: drawRect, withAttributes: attrs)
+        let pointH = canvasSize.height
+        let drawX: CGFloat = 2
+        let drawY = (pointH - textSize.height) / 2
+        (text as NSString).draw(
+            at: NSPoint(x: drawX, y: drawY),
+            withAttributes: attrs
+        )
 
         NSGraphicsContext.restoreGraphicsState()
 
@@ -245,7 +252,7 @@ enum MenuBarIconProvider {
     /// size. The icon is scaled to ``iconHeight`` (or the provided override)
     /// while preserving its aspect ratio. Template images are tinted white
     /// to match the dark menu bar.
-    private static func renderNSImage(_ image: NSImage, canvasSize: CGSize, scale: CGFloat, maxIconHeight: CGFloat? = nil) -> CGImage? {
+    private static func renderNSImage(_ image: NSImage, canvasSize: CGSize, scale: CGFloat, maxIconHeight: CGFloat? = nil, forceMono: Bool = false) -> CGImage? {
         guard canvasSize.width > 0, canvasSize.height > 0 else {
             return nil
         }
@@ -305,9 +312,8 @@ enum MenuBarIconProvider {
         image.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0)
 
         if image.isTemplate {
-            // Template images render as black by default. Tint them white
-            // to match the dark menu bar: fill white using .sourceIn which
-            // replaces RGB with white while preserving the alpha channel.
+            // Template images render as black by default. Tint white
+            // to match the dark menu bar.
             context.setBlendMode(.sourceIn)
             context.setFillColor(CGColor.white)
             context.fill(CGRect(x: 0, y: 0, width: canvasPixelW, height: canvasPixelH))
@@ -315,6 +321,61 @@ enum MenuBarIconProvider {
 
         NSGraphicsContext.restoreGraphicsState()
 
-        return context.makeImage()
+        guard var cgImage = context.makeImage() else { return nil }
+
+        if forceMono {
+            // Convert colored icon to menu-bar-style white: use each
+            // pixel's luminance as the alpha for a white pixel. Bright
+            // colored areas become opaque white, dark areas become
+            // transparent, preserving shading and depth.
+            cgImage = luminanceToWhiteAlpha(cgImage) ?? cgImage
+        }
+
+        return cgImage
+    }
+
+    /// Converts a CGImage to white pixels with luminance-based alpha.
+    /// Each pixel's brightness becomes the opacity of a white pixel,
+    /// producing a menu-bar-style icon with natural shading.
+    private static func luminanceToWhiteAlpha(_ source: CGImage) -> CGImage? {
+        let w = source.width
+        let h = source.height
+        let bytesPerRow = w * 4
+
+        guard let ctx = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: renderColorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        ctx.draw(source, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        guard let data = ctx.data else { return nil }
+        let pixels = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+
+        for i in 0..<(w * h) {
+            let offset = i * 4
+            let r = Float(pixels[offset])
+            let g = Float(pixels[offset + 1])
+            let b = Float(pixels[offset + 2])
+            let a = Float(pixels[offset + 3])
+
+            // Rec. 601 luminance.
+            let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+            let newAlpha = UInt8(min(lum * a, 255))
+
+            pixels[offset] = 255     // R
+            pixels[offset + 1] = 255 // G
+            pixels[offset + 2] = 255 // B
+            pixels[offset + 3] = newAlpha
+        }
+
+        return ctx.makeImage()
     }
 }
