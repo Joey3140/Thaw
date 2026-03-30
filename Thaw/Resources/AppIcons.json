@@ -25,7 +25,7 @@
     "forceTemplate": true
   },
   "com.if.Amphetamine": {
-    "defaultIcon": "AmphIcon_v1",
+    "defaultIcon": "mono:AmphIcon_v1",
     "hint": "Amphetamine"
   },
   "com.jetbrains.toolbox": {
@@ -41,7 +41,7 @@
     "hint": "OneDrive"
   },
   "com.microsoft.Outlook": {
-    "defaultIcon": "ic_fluent_outlook_20_color",
+    "defaultIcon": "mono:ol_outlook_16",
     "hint": "Outlook"
   },
   "com.microsoft.teams2": {
