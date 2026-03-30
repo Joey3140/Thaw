@@ -242,11 +242,8 @@ enum MenuBarIconProvider {
 
     // MARK: - Image Rendering
 
-    /// Target height for template (monochrome) icons.
+    /// Target height for all icons in the layout pane and Ice Bar.
     private static let iconHeight: CGFloat = 18
-    /// Target height for non-template (colored) icons — slightly larger
-    /// since they typically have built-in padding in their design.
-    private static let colorIconHeight: CGFloat = 20
 
     /// Renders an NSImage to a CGImage, centered within the given canvas
     /// size. The icon is scaled to ``iconHeight`` (or the provided override)
@@ -259,14 +256,7 @@ enum MenuBarIconProvider {
 
         // Determine the icon's rendered size.
         let aspect = image.size.width / max(image.size.height, 1)
-        let targetH: CGFloat
-        if let override = maxIconHeight {
-            targetH = override
-        } else if !image.isTemplate {
-            targetH = colorIconHeight
-        } else {
-            targetH = iconHeight
-        }
+        let targetH: CGFloat = maxIconHeight ?? iconHeight
         let maxH = min(targetH, canvasSize.height)
         let iconH = maxH * scale
         let iconW = iconH * aspect
