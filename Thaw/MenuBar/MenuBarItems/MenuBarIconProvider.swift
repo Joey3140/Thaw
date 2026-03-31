@@ -48,7 +48,6 @@ enum MenuBarIconProvider {
             return nil
         }
 
-        // mono: override — draw the full-color icon then tint all pixels white.
         let forceMono = best.name.hasPrefix("mono:")
 
         guard let cgImage = renderNSImage(best.image, canvasSize: canvasSize, scale: scale, forceMono: forceMono) else {
@@ -325,8 +324,7 @@ enum MenuBarIconProvider {
     }
 
     /// Converts a CGImage to white pixels with luminance-based alpha.
-    /// Each pixel's brightness becomes the opacity of a white pixel,
-    /// producing a menu-bar-style icon with natural shading.
+    /// Each pixel's brightness becomes the opacity of a white pixel.
     private static func luminanceToWhiteAlpha(_ source: CGImage) -> CGImage? {
         let w = source.width
         let h = source.height

@@ -169,12 +169,7 @@ enum AssetCatalogReader {
     /// - `"sf:symbol.name"` — loads an SF Symbol
     /// - `"mono:resourceName"` — loads from bundle, rendered as white filled silhouette
     /// - `"resourceName"` — loads from the app bundle
-    ///
-    /// The `mono:` prefix draws the icon normally then tints all visible
-    /// pixels white, preserving the original shape including filled areas.
-    /// This differs from template rendering which may strip fills.
     private static func resolveIcon(_ name: String, bundle: Bundle, forceTemplate: Bool) -> (name: String, image: NSImage)? {
-        // Strip mono: prefix — forces white-fill rendering.
         let isMono = name.hasPrefix("mono:")
         let resolvedName = isMono ? String(name.dropFirst(5)) : name
 
