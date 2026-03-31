@@ -189,6 +189,11 @@ final class MenuBarItemManager: ObservableObject {
     /// each time a new late-arriving profile item is detected.
     private var profileResortTask: Task<Void, Never>?
 
+    /// True while `applyProfileLayout` is executing. Suppresses the
+    /// late-arrival detection in `cacheItemsRegardless` to prevent
+    /// false re-sort triggers during an in-flight sort.
+    private var isApplyingProfileLayout = false
+
     /// Persisted mapping of item tag identifiers to their original section name for
     /// temporarily shown items whose apps quit before they could be rehidden. When
     /// the app relaunches, this allows us to move the item back to its original section.
@@ -1065,7 +1070,8 @@ extension MenuBarItemManager {
             // schedule a debounced re-sort to place them correctly.
             if activeProfileLayout != nil,
                !activeProfileItemIdentifiers.isEmpty,
-               profileResortTask == nil
+               profileResortTask == nil,
+               !isApplyingProfileLayout
             {
                 let currentIdentifiers = Set(
                     items
@@ -3972,6 +3978,7 @@ extension MenuBarItemManager {
         profileSortedItemIdentifiers.removeAll()
         profileResortTask?.cancel()
         profileResortTask = nil
+        isApplyingProfileLayout = false
     }
 
     /// Applies a profile's layout by moving items to match the profile's
@@ -4001,6 +4008,7 @@ extension MenuBarItemManager {
         // Cache profile layout for late-arriving icon re-sort.
         profileResortTask?.cancel()
         profileResortTask = nil
+        isApplyingProfileLayout = true
         activeProfileLayout = (
             pinnedHidden: pinnedHidden,
             pinnedAlwaysHidden: pinnedAlwaysHidden,
@@ -4506,6 +4514,7 @@ extension MenuBarItemManager {
         // late-arrival detection doesn't re-trigger for items we just sorted.
         items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
         updateProfileSortedSnapshot()
+        isApplyingProfileLayout = false
 
         await cacheItemsRegardless(skipRecentMoveCheck: true)
 
