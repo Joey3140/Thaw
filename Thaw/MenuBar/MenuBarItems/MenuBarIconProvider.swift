@@ -141,7 +141,7 @@ enum MenuBarIconProvider {
     /// Renders Thaw's own control item icon using the user's configured icon.
     @MainActor
     private static func renderThawControlItem(
-        _ item: MenuBarItem,
+        _: MenuBarItem,
         appState: AppState,
         canvasSize: CGSize,
         scale: CGFloat
@@ -347,7 +347,7 @@ enum MenuBarIconProvider {
         guard let data = ctx.data else { return nil }
         let pixels = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
 
-        for i in 0..<(w * h) {
+        for i in 0 ..< (w * h) {
             let offset = i * 4
             let r = Float(pixels[offset])
             let g = Float(pixels[offset + 1])
@@ -358,7 +358,7 @@ enum MenuBarIconProvider {
             let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
             let newAlpha = UInt8(min(lum * a, 255))
 
-            pixels[offset] = 255     // R
+            pixels[offset] = 255 // R
             pixels[offset + 1] = 255 // G
             pixels[offset + 2] = 255 // B
             pixels[offset + 3] = newAlpha

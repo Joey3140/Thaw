@@ -2,6 +2,7 @@
 //  ProfileSettingsPane.swift
 //  Project: Thaw
 //
+//  Copyright (Ice) © 2023–2025 Jordan Baird
 //  Copyright (Thaw) © 2026 Toni Förster
 //  Licensed under the GNU GPLv3
 
@@ -139,7 +140,8 @@ struct ProfileSettingsPane: View {
             }
         } message: {
             if let id = profileToDelete,
-               let profile = profileManager.profiles.first(where: { $0.id == id }) {
+               let profile = profileManager.profiles.first(where: { $0.id == id })
+            {
                 Text("Are you sure you want to delete the profile \"\(profile.name)\"? This cannot be undone.")
             }
         }

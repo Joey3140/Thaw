@@ -290,7 +290,7 @@ private struct IconPickerView: View {
                                 name: icon.name,
                                 image: icon.image,
                                 isSelected: icon.name == currentOverride
-                                    || "mono:\(icon.name)" == currentOverride
+                                    || currentOverride == "mono:\(icon.name)"
                             ) {
                                 onSelect(overrideValue)
                             }

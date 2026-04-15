@@ -4058,6 +4058,7 @@ extension MenuBarItemManager {
         profileSortedItemIdentifiers.removeAll()
         profileResortTask?.cancel()
         profileResortTask = nil
+        isApplyingProfileLayout = false
         persistKnownItemIdentifiers()
         persistPinnedBundleIDs()
         persistPendingRelocations()
@@ -4270,6 +4271,19 @@ extension MenuBarItemManager {
         persistPinnedBundleIDs()
         persistSavedSectionOrder()
 
+        // Cache profile layout for late-arriving icon re-sort.
+        profileResortTask?.cancel()
+        profileResortTask = nil
+        isApplyingProfileLayout = true
+        activeProfileLayout = (
+            pinnedHidden: pinnedHidden,
+            pinnedAlwaysHidden: pinnedAlwaysHidden,
+            sectionOrder: sectionOrder,
+            itemSectionMap: itemSectionMap,
+            itemOrder: itemOrder
+        )
+        activeProfileItemIdentifiers = Set(itemOrder.values.flatMap { $0 })
+
         // Prevent the cache cycle from saving intermediate positions.
         isRestoringItemOrder = true
         isRestoringItemOrderTimestamp = Date()
@@ -4334,6 +4348,16 @@ extension MenuBarItemManager {
             (item.canBeHidden || item.tag == .visibleControlItem) && item.isMovable
         }
 
+        // Helper: update profileSortedItemIdentifiers so re-sort detection
+        // doesn't keep re-triggering for items already evaluated.
+        func updateProfileSortedSnapshot() {
+            profileSortedItemIdentifiers = Set(
+                items
+                    .filter { !$0.isControlItem }
+                    .map(\.uniqueIdentifier)
+            )
+        }
+
         let hiddenCtrlUID = controlItems.hidden.uniqueIdentifier
         let ahCtrlUID = controlItems.alwaysHidden?.uniqueIdentifier
 
@@ -4375,10 +4399,8 @@ extension MenuBarItemManager {
             }
         }
 
-        // Filter both sequences to only items present in both.
+        // Filter desired sequence to only items present in current.
         let currentSet = Set(currentFlat)
-        let desiredSet = Set(desiredFlat)
-        let currentFiltered = currentFlat.filter { desiredSet.contains($0) }
         let desiredFiltered = desiredFlat.filter { currentSet.contains($0) }
 
         // On notched displays, use a full-section rearrange instead of
@@ -4445,7 +4467,7 @@ extension MenuBarItemManager {
             for uid in fullSequence {
                 guard !Task.isCancelled else { break }
 
-                var freshItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+                let freshItems = await MenuBarItem.getMenuBarItems(option: .activeSpace)
 
                 let isControlUID = uid == hiddenCtrlUID || uid == ahCtrlUID
                 guard let item = freshItems.first(where: {
@@ -4518,8 +4540,8 @@ extension MenuBarItemManager {
                 }
             }
 
-            let desiredHiddenSet = Set((itemOrder["hidden"] ?? []))
-            let desiredAHSet = Set((itemOrder["alwaysHidden"] ?? []))
+            let desiredHiddenSet = Set(itemOrder["hidden"] ?? [])
+            let desiredAHSet = Set(itemOrder["alwaysHidden"] ?? [])
             let currentHiddenSet = Set(currentSectionForUID.filter { $0.value == "hidden" }.map(\.key))
             let currentAHSet = Set(currentSectionForUID.filter { $0.value == "alwaysHidden" }.map(\.key))
 
@@ -4637,7 +4659,7 @@ extension MenuBarItemManager {
 
             MenuBarItemManager.diagLog.info(
                 "Profile layout: \(itemsToMove.count) item move(s) needed " +
-                "(LCS kept \(lcsItems.count) items in place, \(movedCount) control move(s))"
+                    "(LCS kept \(lcsItems.count) items in place, \(movedCount) control move(s))"
             )
 
             var movedItems = Set<String>()
@@ -4679,7 +4701,7 @@ extension MenuBarItemManager {
                 var dest: MoveDestination?
 
                 // Scan within the same section for stable anchors.
-                for scanIdx in (desiredIdx + 1)..<lcsDesired.count {
+                for scanIdx in (desiredIdx + 1) ..< lcsDesired.count {
                     let candidateUID = lcsDesired[scanIdx]
                     let candidateKey = sectionMap[candidateUID] ?? "visible"
                     guard candidateKey == targetKey else { break }
@@ -4693,7 +4715,7 @@ extension MenuBarItemManager {
                     }
                 }
 
-                if dest == nil && desiredIdx > 0 {
+                if dest == nil, desiredIdx > 0 {
                     for scanIdx in stride(from: desiredIdx - 1, through: 0, by: -1) {
                         let candidateUID = lcsDesired[scanIdx]
                         let candidateKey = sectionMap[candidateUID] ?? "visible"
@@ -4741,12 +4763,50 @@ extension MenuBarItemManager {
             section.controlItem.state = .hideSection
         }
 
+        // Re-fetch items after moves and update the snapshot so the
+        // late-arrival detection doesn't re-trigger for items we just sorted.
+        items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+        updateProfileSortedSnapshot()
+        isApplyingProfileLayout = false
+
         await cacheItemsRegardless(skipRecentMoveCheck: true)
 
         // Refresh image cache so the Layout Bar UI updates immediately.
         appState.imageCache.performCacheCleanup()
         await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
         await MainActor.run { appState.objectWillChange.send() }
+    }
+
+    /// Schedules a debounced re-sort when profile items arrive late.
+    private func scheduleProfileResort() {
+        profileResortTask?.cancel()
+        profileResortTask = Task { [weak self] in
+            // Short debounce to coalesce multiple items appearing in quick
+            // succession. The app-launch notification already has a 1s debounce,
+            // so this only needs to cover the gap between detection and action.
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return // Cancelled — a newer schedule replaced us.
+            }
+            guard let self, let layout = self.activeProfileLayout else { return }
+            guard !self.isInStartupSettling else { return }
+            guard !self.isRestoringItemOrder else { return }
+
+            MenuBarItemManager.diagLog.info("Profile re-sort: re-applying layout for late-arriving items")
+            // Clear profileResortTask BEFORE calling applyProfileLayout,
+            // because applyProfileLayout cancels profileResortTask to
+            // prevent concurrent re-sorts — which would cancel THIS task
+            // and cause the move loop to exit via Task.isCancelled.
+            self.profileResortTask = nil
+            await self.applyProfileLayout(
+                pinnedHidden: layout.pinnedHidden,
+                pinnedAlwaysHidden: layout.pinnedAlwaysHidden,
+                sectionOrder: layout.sectionOrder,
+                itemSectionMap: layout.itemSectionMap,
+                itemOrder: layout.itemOrder
+            )
+        }
     }
 
     /// Computes the Longest Common Subsequence of two string arrays.
@@ -4758,8 +4818,8 @@ extension MenuBarItemManager {
 
         // DP table.
         var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
-        for i in 1...m {
-            for j in 1...n {
+        for i in 1 ... m {
+            for j in 1 ... n {
                 if a[i - 1] == b[j - 1] {
                     dp[i][j] = dp[i - 1][j - 1] + 1
                 } else {
