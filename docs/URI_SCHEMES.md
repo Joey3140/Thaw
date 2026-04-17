@@ -257,6 +257,123 @@ open "thaw://toggle?key=useIceBar&display=XYZ789-..."
 
 **Note:** Display UUIDs can be found in System Settings → Displays, or via the `system_profiler SPDisplaysDataType` command. If the specified display is not connected, the request fails silently.
 
+### Getting Settings (Read Operations)
+
+Thaw supports reading settings via `thaw://get` URLs. You must provide a response mechanism: either a `callback` URL or `broadcast=true` for distributed notifications.
+
+#### Get All Settings
+
+```bash
+# Get all settings with callback URL
+open "thaw://get?key=all&callback=droppy://thaw-response&requestId=abc123"
+
+# Or broadcast via distributed notification
+open "thaw://get?key=all&broadcast=true&requestId=abc123"
+```
+
+**Response JSON:**
+```json
+{
+  "requestId": "abc123",
+  "status": "success",
+  "data": {
+    "global": {
+      "autoRehide": {"value": true, "type": "boolean"},
+      "rehideInterval": {"value": 5.0, "type": "double", "range": {"min": 1, "max": 300}},
+      "rehideStrategy": {"value": "timed", "rawValue": 1, "type": "enum", "validValues": {"smart": 0, "timed": 1, "focusedApp": 2}}
+    },
+    "displays": {
+      "37D8832A-2D66-02CA-B9F7-8F30A301B230": {
+        "name": "Built-in Retina Display",
+        "isConnected": true,
+        "isPrimary": true,
+        "hasNotch": true,
+        "resolution": "2560x1600",
+        "useIceBar": true,
+        "iceBarLocation": "mousePointer",
+        "alwaysShowHiddenItems": false
+      }
+    }
+  }
+}
+```
+
+#### Get Individual Setting
+
+```bash
+# Get single setting
+open "thaw://get?key=autoRehide&callback=droppy://thaw-response"
+
+# Get per-display setting
+open "thaw://get?key=useIceBar&display=37D8832A-...&callback=droppy://thaw-response"
+```
+
+**Response JSON:**
+```json
+{
+  "requestId": "uuid",
+  "status": "success",
+  "key": "autoRehide",
+  "data": {"value": true, "type": "boolean"}
+}
+```
+
+#### Get Display Information
+
+```bash
+# Get all displays
+open "thaw://get?key=displays&callback=droppy://thaw-response"
+
+# Get specific display
+open "thaw://get?key=display&display=37D8832A-...&callback=droppy://thaw-response"
+```
+
+**Response JSON:**
+```json
+{
+  "requestId": "uuid",
+  "status": "success",
+  "data": {
+    "displays": [
+      {
+        "uuid": "37D8832A-...",
+        "name": "Built-in Retina Display",
+        "isConnected": true,
+        "isPrimary": true,
+        "hasNotch": true,
+        "resolution": "2560x1600",
+        "useIceBar": true,
+        "iceBarLocation": "mousePointer",
+        "alwaysShowHiddenItems": false
+      }
+    ]
+  }
+}
+```
+
+#### Response Mechanisms
+
+**Callback URL (Recommended):**
+- Thaw opens the provided URL with URL-encoded JSON data
+- Format: `yourapp://thaw-response?data=<url-encoded-json>`
+- Your app must implement a URI handler for the callback
+
+**Distributed Notification:**
+- Thaw broadcasts via `DistributedNotificationCenter`
+- Notification name: `com.stonerl.Thaw.settingsURIGetResponse`
+- Any listening app receives the response without implementing URI handlers
+- Less reliable if app isn't actively listening
+
+**Error Response:**
+```json
+{
+  "requestId": "uuid",
+  "status": "error",
+  "error": "Display not found",
+  "details": "UUID: INVALID-UUID"
+}
+```
+
 #### Testing from Terminal (DEBUG Builds Only)
 
 When testing from Terminal, the sender app detection may fail because `open` command doesn't properly identify the source. DEBUG builds support a manual `bundleId` override parameter:

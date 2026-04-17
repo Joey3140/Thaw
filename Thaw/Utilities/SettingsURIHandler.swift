@@ -602,6 +602,295 @@ enum SettingsURIHandler {
     static func isEnabled() -> Bool {
         return Defaults.bool(forKey: .settingsURIEnabled)
     }
+
+    // MARK: - Getters (Read Operations)
+
+    /// Handles thaw://get?key=X&callback=Y URLs.
+    /// Returns settings values via callback URL or distributed notification.
+    static func handleGet(
+        key: String?,
+        displayUUID: String?,
+        callback: String?,
+        broadcast: Bool,
+        requestId: String?
+    ) -> Bool {
+        let responseId = requestId ?? UUID().uuidString
+
+        // Validate response mechanism
+        guard callback != nil || broadcast else {
+            let error = createErrorResponse(requestId: responseId, error: "No response mechanism specified", details: "Provide callback=<url> or broadcast=true")
+            diagLog.warning("Settings URI Get: No response mechanism provided")
+            return false
+        }
+
+        // Gather requested data
+        let response: [String: Any]
+
+        if let singleKey = key {
+            // Single key request
+            response = handleSingleKeyGet(key: singleKey, displayUUID: displayUUID, requestId: responseId)
+        } else {
+            // No key specified - error
+            response = createErrorResponse(requestId: responseId, error: "No key specified", details: "Provide key=<name>")
+        }
+
+        // Send response
+        if let callbackURL = callback {
+            return sendCallbackResponse(response: response, callback: callbackURL)
+        } else if broadcast {
+            return sendBroadcastResponse(response: response)
+        }
+
+        return false
+    }
+
+    /// Handles getting a single key's value.
+    private static func handleSingleKeyGet(key: String, displayUUID: String?, requestId: String) -> [String: Any] {
+        switch key {
+        case "all":
+            return getAllSettings(requestId: requestId)
+        case "displays":
+            return getAllDisplays(requestId: requestId)
+        case "display":
+            if let uuid = displayUUID {
+                return getSpecificDisplay(uuid: uuid, requestId: requestId)
+            } else {
+                return createErrorResponse(requestId: requestId, error: "Display UUID required", details: "Provide display=<uuid> when key=display")
+            }
+        default:
+            // Individual setting
+            if let value = getSettingValue(key: key, displayUUID: displayUUID) {
+                return [
+                    "requestId": requestId,
+                    "status": "success",
+                    "key": key,
+                    "data": value,
+                ]
+            } else {
+                return createErrorResponse(requestId: requestId, error: "Setting not found or invalid key", details: "Key: \(key)")
+            }
+        }
+    }
+
+    /// Gets a single setting value with metadata.
+    private static func getSettingValue(key: String, displayUUID _: String?) -> [String: Any]? {
+        // Check if it's a boolean setting
+        if supportedBooleanKeys.contains(key) || perDisplayKeys.contains(key) {
+            guard let defaultsKey = keyMapping[key] else { return nil }
+            let value = Defaults.bool(forKey: defaultsKey)
+            return [
+                "value": value,
+                "type": "boolean",
+            ]
+        }
+
+        // Check if it's a double setting
+        if doubleKeys.contains(key) {
+            guard let defaultsKey = keyMapping[key] else { return nil }
+            let value = Defaults.double(forKey: defaultsKey)
+            let range = doubleRanges[key]
+            var result: [String: Any] = [
+                "value": value,
+                "type": "double",
+            ]
+            if let (min, max) = range {
+                result["range"] = ["min": min, "max": max]
+            }
+            return result
+        }
+
+        // Check if it's an enum setting
+        if enumKeys.contains(key) {
+            guard let defaultsKey = keyMapping[key] else { return nil }
+            let rawValue = Defaults.integer(forKey: defaultsKey)
+
+            if key == "rehideStrategy", let strategy = RehideStrategy(rawValue: rawValue) {
+                return [
+                    "value": String(describing: strategy),
+                    "rawValue": rawValue,
+                    "type": "enum",
+                    "validValues": ["smart": 0, "timed": 1, "focusedApp": 2],
+                ]
+            }
+
+            return [
+                "rawValue": rawValue,
+                "type": "enum",
+            ]
+        }
+
+        return nil
+    }
+
+    /// Gets all settings including per-display configurations.
+    private static func getAllSettings(requestId: String) -> [String: Any] {
+        var globalSettings: [String: [String: Any]] = [:]
+
+        // Boolean settings
+        for key in supportedBooleanKeys where !perDisplayKeys.contains(key) {
+            if let value = getSettingValue(key: key, displayUUID: nil) {
+                globalSettings[key] = value
+            }
+        }
+
+        // Double settings
+        for key in doubleKeys {
+            if let value = getSettingValue(key: key, displayUUID: nil) {
+                globalSettings[key] = value
+            }
+        }
+
+        // Enum settings
+        for key in enumKeys {
+            if let value = getSettingValue(key: key, displayUUID: nil) {
+                globalSettings[key] = value
+            }
+        }
+
+        // Per-display settings
+        var displaysData: [String: [String: Any]] = [:]
+        for screen in NSScreen.screens {
+            guard let uuid = Bridging.getDisplayUUIDString(for: screen.displayID) else { continue }
+            displaysData[uuid] = getDisplayInfo(screen: screen, uuid: uuid)
+        }
+
+        return [
+            "requestId": requestId,
+            "status": "success",
+            "data": [
+                "global": globalSettings,
+                "displays": displaysData,
+            ],
+        ]
+    }
+
+    /// Gets information for a specific display.
+    private static func getDisplayInfo(screen: NSScreen, uuid: String) -> [String: Any] {
+        let config = Defaults.data(forKey: .displayIceBarConfigurations)
+            .flatMap { try? JSONDecoder().decode([String: DisplayIceBarConfiguration].self, from: $0) }?[uuid]
+            ?? .defaultConfiguration
+
+        let displayID = screen.displayID
+        let isConnected = CGDisplayIsActive(displayID) != 0
+
+        return [
+            "name": screen.localizedName,
+            "isConnected": isConnected,
+            "isPrimary": screen == NSScreen.main,
+            "hasNotch": screen.hasNotch,
+            "resolution": "\(Int(screen.frame.width))x\(Int(screen.frame.height))",
+            "useIceBar": config.useIceBar,
+            "iceBarLocation": String(describing: config.iceBarLocation),
+            "alwaysShowHiddenItems": config.alwaysShowHiddenItems,
+        ]
+    }
+
+    /// Gets all displays.
+    private static func getAllDisplays(requestId: String) -> [String: Any] {
+        var displays: [[String: Any]] = []
+
+        for screen in NSScreen.screens {
+            guard let uuid = Bridging.getDisplayUUIDString(for: screen.displayID) else { continue }
+            var info = getDisplayInfo(screen: screen, uuid: uuid)
+            info["uuid"] = uuid
+            displays.append(info)
+        }
+
+        return [
+            "requestId": requestId,
+            "status": "success",
+            "data": ["displays": displays],
+        ]
+    }
+
+    /// Gets a specific display by UUID.
+    private static func getSpecificDisplay(uuid: String, requestId: String) -> [String: Any] {
+        // Find screen with matching UUID
+        for screen in NSScreen.screens {
+            guard let screenUUID = Bridging.getDisplayUUIDString(for: screen.displayID),
+                  screenUUID == uuid else { continue }
+
+            var info = getDisplayInfo(screen: screen, uuid: uuid)
+            info["uuid"] = uuid
+
+            return [
+                "requestId": requestId,
+                "status": "success",
+                "data": info,
+            ]
+        }
+
+        // Check if we have config for disconnected display
+        if let configs = Defaults.data(forKey: .displayIceBarConfigurations)
+            .flatMap({ try? JSONDecoder().decode([String: DisplayIceBarConfiguration].self, from: $0) }),
+            let config = configs[uuid]
+        {
+            return [
+                "requestId": requestId,
+                "status": "success",
+                "data": [
+                    "uuid": uuid,
+                    "name": "Disconnected Display",
+                    "isConnected": false,
+                    "useIceBar": config.useIceBar,
+                    "iceBarLocation": String(describing: config.iceBarLocation),
+                    "alwaysShowHiddenItems": config.alwaysShowHiddenItems,
+                ],
+            ]
+        }
+
+        return createErrorResponse(requestId: requestId, error: "Display not found", details: "UUID: \(uuid)")
+    }
+
+    /// Creates an error response.
+    private static func createErrorResponse(requestId: String, error: String, details: String? = nil) -> [String: Any] {
+        var response: [String: Any] = [
+            "requestId": requestId,
+            "status": "error",
+            "error": error,
+        ]
+        if let details = details {
+            response["details"] = details
+        }
+        return response
+    }
+
+    /// Sends response via callback URL.
+    private static func sendCallbackResponse(response: [String: Any], callback: String) -> Bool {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: response, options: .sortedKeys),
+              let jsonString = String(data: jsonData, encoding: .utf8),
+              let encodedJSON = jsonString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let callbackURL = URL(string: "\(callback)?data=\(encodedJSON)")
+        else {
+            diagLog.error("Settings URI Get: Failed to encode callback response")
+            return false
+        }
+
+        // Open callback URL
+        NSWorkspace.shared.open(callbackURL)
+        diagLog.info("Settings URI Get: Sent callback to \(callback)")
+        return true
+    }
+
+    /// Sends response via distributed notification.
+    private static func sendBroadcastResponse(response: [String: Any]) -> Bool {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: response, options: .sortedKeys),
+              let jsonString = String(data: jsonData, encoding: .utf8)
+        else {
+            diagLog.error("Settings URI Get: Failed to encode broadcast response")
+            return false
+        }
+
+        DistributedNotificationCenter.default().postNotificationName(
+            .settingsURIGetResponse,
+            object: nil,
+            userInfo: ["json": jsonString],
+            deliverImmediately: true
+        )
+
+        diagLog.info("Settings URI Get: Broadcasted response via distributed notification")
+        return true
+    }
 }
 
 // MARK: - Notification Names
@@ -612,4 +901,7 @@ extension Notification.Name {
 
     /// Posted when a per-display setting is changed externally via Settings URI scheme.
     static let perDisplaySettingsDidChangeViaURI = Notification.Name("com.stonerl.Thaw.perDisplaySettingsDidChangeViaURI")
+
+    /// Posted when a get request response is broadcast via distributed notification.
+    static let settingsURIGetResponse = Notification.Name("com.stonerl.Thaw.settingsURIGetResponse")
 }

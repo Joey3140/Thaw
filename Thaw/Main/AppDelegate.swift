@@ -238,6 +238,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             handleSetURL(url, sender: effectiveBundleId)
         case "toggle":
             handleToggleURL(url, sender: effectiveBundleId)
+        case "get":
+            handleGetURL(url, sender: effectiveBundleId)
         default:
             break
         }
@@ -310,6 +312,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let success = SettingsURIHandler.handleToggle(key: key, sender: sender, displayUUID: displayUUID)
         if !success {
             appState.diagLog.warning("Settings URI toggle: failed to toggle \(key)")
+        }
+    }
+
+    /// Handles thaw://get?key=X&callback=Y URLs.
+    private func handleGetURL(_ url: URL, sender _: String?) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            appState.diagLog.warning("Settings URI get: invalid URL \(url.absoluteString)")
+            return
+        }
+
+        // Extract parameters
+        let key = components.queryItems?.first(where: { $0.name == "key" })?.value
+        let displayUUID = components.queryItems?.first(where: { $0.name == "display" })?.value
+        let callback = components.queryItems?.first(where: { $0.name == "callback" })?.value
+        let broadcast = components.queryItems?.first(where: { $0.name == "broadcast" })?.value == "true"
+        let requestId = components.queryItems?.first(where: { $0.name == "requestId" })?.value
+
+        let success = SettingsURIHandler.handleGet(
+            key: key,
+            displayUUID: displayUUID,
+            callback: callback,
+            broadcast: broadcast,
+            requestId: requestId
+        )
+
+        if !success {
+            appState.diagLog.warning("Settings URI get: failed to get \(key ?? "unknown")")
         }
     }
 
