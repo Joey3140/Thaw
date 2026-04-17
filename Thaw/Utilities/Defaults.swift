@@ -272,6 +272,11 @@ extension Defaults {
 
         case hasSeenUpdateConsent
 
+        // MARK: Settings URI
+
+        case settingsURIEnabled = "SettingsURIEnabled"
+        case settingsURIWhitelist = "SettingsURIWhitelist"
+
         // MARK: Deprecated (Appearance Settings)
 
         case menuBarHasBorder = "MenuBarHasBorder"

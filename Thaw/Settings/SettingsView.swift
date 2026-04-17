@@ -158,6 +158,8 @@ struct SettingsView: View {
             ProfileSettingsPane(profileManager: appState.profileManager)
         case .advanced:
             AdvancedSettingsPane(settings: appState.settings.advanced)
+        case .automation:
+            AutomationSettingsPane()
         case .about:
             AboutSettingsPane(updatesManager: appState.updatesManager)
         }

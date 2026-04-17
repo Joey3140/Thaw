@@ -117,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Other Methods
 
-    /// Handles `kAEGetURL` Apple Events and forwards `thaw://` URLs to `handleURL(_:)`.
+    /// Handles `kAEGetURL` Apple Events and forwards `thaw://` URLs to `handleURL(_:senderBundleId:)`.
     @objc private func handleURLAppleEvent(
         _ event: NSAppleEventDescriptor,
         withReplyEvent _: NSAppleEventDescriptor
@@ -127,20 +127,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let url = URL(string: urlString),
             url.scheme?.lowercased() == "thaw"
         else { return }
-        handleURL(url)
+
+        // Extract sender bundle ID from the Apple Event
+        let senderBundleId = extractSenderBundleId(from: event)
+        handleURL(url, senderBundleId: senderBundleId)
+    }
+
+    /// Extracts the sender's bundle identifier from an Apple Event.
+    private func extractSenderBundleId(from event: NSAppleEventDescriptor) -> String? {
+        // Try to get the sender's process ID from the event attributes
+        // keySenderPID is the attribute keyword for sender's process ID
+        let keySenderPID = AEKeyword(keySenderPIDAttr)
+
+        guard let pidDesc = event.attributeDescriptor(forKeyword: keySenderPID),
+              pidDesc.descriptorType == typeSInt32 || pidDesc.descriptorType == typeSInt64
+        else {
+            return nil
+        }
+
+        let pid = pidDesc.int32Value
+
+        // Get the running application
+        guard let app = NSRunningApplication(processIdentifier: pid_t(pid)) else {
+            return nil
+        }
+
+        return app.bundleIdentifier
     }
 
     /// Dispatches an incoming `thaw://` URL to the appropriate action.
     ///
-    /// Supported URLs:
+    /// Supported Action URLs:
     /// - `thaw://toggle-hidden` — toggle the hidden menu bar section
     /// - `thaw://toggle-always-hidden` — toggle the always-hidden menu bar section
     /// - `thaw://search` — open the menu bar item search panel
     /// - `thaw://toggle-thawbar` — toggle the IceBar on the active display
     /// - `thaw://toggle-application-menus` — toggle application menus
     /// - `thaw://open-settings` — open the Thaw settings window
-    private func handleURL(_ url: URL) {
+    ///
+    /// Supported Settings URLs (requires whitelist authorization):
+    /// - `thaw://set?key=X&value=Y` — set a boolean setting
+    /// - `thaw://toggle?key=X` — toggle a boolean setting
+    private func handleURL(_ url: URL, senderBundleId: String? = nil) {
         let host = url.host?.lowercased() ?? ""
+
+        // Handle settings manipulation URLs
+        switch host {
+        case "set", "toggle":
+            handleSettingsURL(url, host: host, senderBundleId: senderBundleId)
+            return
+        default:
+            break
+        }
+
+        // Handle action URLs
         switch host {
         case "toggle-hidden":
             HotkeyAction.toggleHiddenSection.perform(appState: appState)
@@ -156,6 +196,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openSettingsWindow()
         default:
             appState.diagLog.warning("Received unrecognized thaw:// URL: \(url.absoluteString)")
+        }
+    }
+
+    /// Handles settings manipulation URLs (set/toggle).
+    private func handleSettingsURL(_ url: URL, host: String, senderBundleId: String?) {
+        // Check if Settings URI feature is enabled
+        guard SettingsURIHandler.isEnabled() else {
+            appState.diagLog.debug("Settings URI is disabled, ignoring: \(url.absoluteString)")
+            return
+        }
+
+        // Determine effective bundle ID (auto-detected or manual override)
+        let effectiveBundleId = determineEffectiveBundleId(url: url, senderBundleId: senderBundleId)
+
+        // Verify sender is whitelisted, or prompt for first-time authorization
+        if !SettingsURIHandler.isWhitelisted(bundleIdentifier: effectiveBundleId) {
+            // Try to get the sender app name for the dialog
+            let senderName: String
+            if let bundleId = effectiveBundleId,
+               let appName = SettingsURIHandler.getAppName(for: bundleId)
+            {
+                senderName = appName
+            } else if let bundleId = effectiveBundleId {
+                senderName = bundleId
+            } else {
+                senderName = "Unknown App"
+            }
+
+            // Show confirmation dialog
+            let approved = SettingsURIHandler.promptForAuthorization(bundleId: effectiveBundleId ?? senderName)
+            guard approved else {
+                // Unauthorized - silent fail
+                return
+            }
+        }
+
+        // Process the settings URL
+        switch host {
+        case "set":
+            handleSetURL(url, sender: effectiveBundleId)
+        case "toggle":
+            handleToggleURL(url, sender: effectiveBundleId)
+        default:
+            break
+        }
+    }
+
+    /// Determines the effective bundle ID for authorization.
+    /// Uses manual override (DEBUG only) if auto-detection fails.
+    private func determineEffectiveBundleId(url: URL, senderBundleId: String?) -> String? {
+        // If we have auto-detected sender, use it
+        if let sender = senderBundleId {
+            return sender
+        }
+
+        #if DEBUG
+            // In DEBUG builds, allow manual bundleId override for testing
+            // when auto-detection fails (e.g., from Terminal 'open' command)
+            if let manualBundleId = extractManualBundleId(from: url) {
+                appState.diagLog.warning("Settings URI: Using DEBUG manual bundleId=\(manualBundleId) - FOR TESTING ONLY")
+                return manualBundleId
+            }
+        #endif
+
+        return nil
+    }
+
+    #if DEBUG
+        /// Extracts manual bundleId from URL query parameter (DEBUG builds only).
+        private func extractManualBundleId(from url: URL) -> String? {
+            guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let bundleId = components.queryItems?.first(where: { $0.name == "bundleId" })?.value,
+                  !bundleId.isEmpty
+            else {
+                return nil
+            }
+            return bundleId
+        }
+    #endif
+
+    /// Handles thaw://set?key=X&value=Y URL.
+    private func handleSetURL(_ url: URL, sender: String?) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let key = components.queryItems?.first(where: { $0.name == "key" })?.value,
+              let value = components.queryItems?.first(where: { $0.name == "value" })?.value
+        else {
+            appState.diagLog.warning("Settings URI set: missing key or value in \(url.absoluteString)")
+            return
+        }
+
+        let success = SettingsURIHandler.handleSet(key: key, value: value, sender: sender)
+        if !success {
+            appState.diagLog.warning("Settings URI set: failed to set \(key) = \(value)")
+        }
+    }
+
+    /// Handles thaw://toggle?key=X URL.
+    private func handleToggleURL(_ url: URL, sender: String?) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let key = components.queryItems?.first(where: { $0.name == "key" })?.value
+        else {
+            appState.diagLog.warning("Settings URI toggle: missing key in \(url.absoluteString)")
+            return
+        }
+
+        let success = SettingsURIHandler.handleToggle(key: key, sender: sender)
+        if !success {
+            appState.diagLog.warning("Settings URI toggle: failed to toggle \(key)")
         }
     }
 

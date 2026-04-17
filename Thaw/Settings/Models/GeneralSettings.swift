@@ -262,6 +262,53 @@ final class GeneralSettings: ObservableObject {
             }
             .store(in: &c)
 
+        // Observe external settings changes via Settings URI
+        NotificationCenter.default
+            .publisher(for: .settingsDidChangeViaURI)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                self?.handleExternalSettingsChange(notification)
+            }
+            .store(in: &c)
+
         cancellables = c
+    }
+
+    /// Handles settings changed externally via Settings URI scheme.
+    private func handleExternalSettingsChange(_ notification: Notification) {
+        guard let key = notification.userInfo?["key"] as? String,
+              let value = notification.userInfo?["value"] as? Bool
+        else {
+            return
+        }
+
+        diagLog.debug("GeneralSettings: Received external change for \(key) = \(value)")
+
+        // Update the corresponding @Published property without triggering the publisher
+        switch key {
+        case "showIceIcon":
+            showIceIcon = value
+        case "customIceIconIsTemplate":
+            customIceIconIsTemplate = value
+        case "useIceBar":
+            useIceBar = value
+        case "useIceBarOnlyOnNotchedDisplay":
+            useIceBarOnlyOnNotchedDisplay = value
+        case "iceBarLocationOnHotkey":
+            iceBarLocationOnHotkey = value
+        case "showOnClick":
+            showOnClick = value
+        case "showOnDoubleClick":
+            showOnDoubleClick = value
+        case "showOnHover":
+            showOnHover = value
+        case "showOnScroll":
+            showOnScroll = value
+        case "autoRehide":
+            autoRehide = value
+        default:
+            // Key not handled by GeneralSettings
+            break
+        }
     }
 }

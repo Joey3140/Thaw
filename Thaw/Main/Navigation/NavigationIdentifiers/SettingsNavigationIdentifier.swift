@@ -17,6 +17,7 @@ enum SettingsNavigationIdentifier: String, NavigationIdentifier {
     case hotkeys = "Hotkeys"
     case profiles = "Profiles"
     case advanced = "Advanced"
+    case automation = "Automation"
     case about = "About"
 
     var localized: LocalizedStringKey {
@@ -28,6 +29,7 @@ enum SettingsNavigationIdentifier: String, NavigationIdentifier {
         case .hotkeys: "Hotkeys"
         case .profiles: "Profiles"
         case .advanced: "Advanced"
+        case .automation: "Automation"
         case .about: "About"
         }
     }
@@ -41,6 +43,7 @@ enum SettingsNavigationIdentifier: String, NavigationIdentifier {
         case .hotkeys: .systemSymbol("keyboard")
         case .profiles: .systemSymbol("person.crop.rectangle.stack")
         case .advanced: .systemSymbol("gearshape.2")
+        case .automation: .systemSymbol("app.badge.checkmark")
         case .about: .assetCatalog(.iceCubeStroke)
         }
     }
