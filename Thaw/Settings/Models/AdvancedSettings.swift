@@ -191,32 +191,49 @@ final class AdvancedSettings: ObservableObject {
 
     /// Handles settings changed externally via Settings URI scheme.
     private func handleExternalSettingsChange(_ notification: Notification) {
-        guard let key = notification.userInfo?["key"] as? String,
-              let value = notification.userInfo?["value"] as? Bool
-        else {
+        guard let key = notification.userInfo?["key"] as? String else {
             return
         }
 
-        // Update the corresponding @Published property without triggering the publisher
-        switch key {
-        case "enableAlwaysHiddenSection":
-            enableAlwaysHiddenSection = value
-        case "useOptionClickToShowAlwaysHiddenSection":
-            useOptionClickToShowAlwaysHiddenSection = value
-        case "showAllSectionsOnUserDrag":
-            showAllSectionsOnUserDrag = value
-        case "hideApplicationMenus":
-            hideApplicationMenus = value
-        case "enableSecondaryContextMenu":
-            enableSecondaryContextMenu = value
-        case "showMenuBarTooltips":
-            showMenuBarTooltips = value
-        case "enableDiagnosticLogging":
-            enableDiagnosticLogging = value
-            DiagnosticLogger.shared.isEnabled = value
-        default:
-            // Key not handled by AdvancedSettings
-            break
+        // Handle boolean values
+        if let boolValue = notification.userInfo?["value"] as? Bool {
+            switch key {
+            case "enableAlwaysHiddenSection":
+                enableAlwaysHiddenSection = boolValue
+            case "useOptionClickToShowAlwaysHiddenSection":
+                useOptionClickToShowAlwaysHiddenSection = boolValue
+            case "showAllSectionsOnUserDrag":
+                showAllSectionsOnUserDrag = boolValue
+            case "hideApplicationMenus":
+                hideApplicationMenus = boolValue
+            case "enableSecondaryContextMenu":
+                enableSecondaryContextMenu = boolValue
+            case "showMenuBarTooltips":
+                showMenuBarTooltips = boolValue
+            case "enableDiagnosticLogging":
+                enableDiagnosticLogging = boolValue
+                DiagnosticLogger.shared.isEnabled = boolValue
+            case "useLCSSortingOnNotchedDisplays":
+                useLCSSortingOnNotchedDisplays = boolValue
+            default:
+                // Key not handled by AdvancedSettings
+                break
+            }
+        }
+
+        // Handle double values
+        if let doubleValue = notification.userInfo?["doubleValue"] as? Double {
+            switch key {
+            case "showOnHoverDelay":
+                showOnHoverDelay = doubleValue
+            case "tooltipDelay":
+                tooltipDelay = doubleValue
+            case "iconRefreshInterval":
+                iconRefreshInterval = doubleValue
+            default:
+                // Key not handled by AdvancedSettings
+                break
+            }
         }
     }
 }

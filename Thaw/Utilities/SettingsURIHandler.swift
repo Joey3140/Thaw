@@ -31,6 +31,29 @@ enum SettingsURIHandler {
         "showMenuBarTooltips",
         "enableDiagnosticLogging",
         "customIceIconIsTemplate",
+        "showIceIcon",
+        "iceBarLocationOnHotkey",
+        "useLCSSortingOnNotchedDisplays",
+    ]
+
+    /// Double/numeric settings with ranges
+    static let doubleKeys: [String] = [
+        "rehideInterval",
+        "showOnHoverDelay",
+        "tooltipDelay",
+        "iconRefreshInterval",
+    ]
+
+    /// Enum settings with string values
+    static let enumKeys: [String] = [
+        "rehideStrategy",
+    ]
+
+    /// Per-display settings keys (stored in DisplaySettingsManager, not Defaults)
+    static let perDisplayKeys: [String] = [
+        "useIceBar",
+        "iceBarLocation",
+        "alwaysShowHiddenItems",
     ]
 
     /// Mapping of URI key names to Defaults.Key enum cases
@@ -40,7 +63,6 @@ enum SettingsURIHandler {
         "showOnDoubleClick": .showOnDoubleClick,
         "showOnHover": .showOnHover,
         "showOnScroll": .showOnScroll,
-        "useIceBar": .useIceBar,
         "useIceBarOnlyOnNotchedDisplay": .useIceBarOnlyOnNotchedDisplay,
         "hideApplicationMenus": .hideApplicationMenus,
         "enableAlwaysHiddenSection": .enableAlwaysHiddenSection,
@@ -50,6 +72,22 @@ enum SettingsURIHandler {
         "showMenuBarTooltips": .showMenuBarTooltips,
         "enableDiagnosticLogging": .enableDiagnosticLogging,
         "customIceIconIsTemplate": .customIceIconIsTemplate,
+        "showIceIcon": .showIceIcon,
+        "iceBarLocationOnHotkey": .iceBarLocationOnHotkey,
+        "useLCSSortingOnNotchedDisplays": .useLCSSortingOnNotchedDisplays,
+        "rehideInterval": .rehideInterval,
+        "showOnHoverDelay": .showOnHoverDelay,
+        "tooltipDelay": .tooltipDelay,
+        "iconRefreshInterval": .iconRefreshInterval,
+        "rehideStrategy": .rehideStrategy,
+    ]
+
+    /// Valid ranges for double settings (min, max, default)
+    private static let doubleRanges: [String: (min: Double, max: Double)] = [
+        "rehideInterval": (1, 300),
+        "showOnHoverDelay": (0, 5),
+        "tooltipDelay": (0, 5),
+        "iconRefreshInterval": (0.1, 5),
     ]
 
     // MARK: - Security
@@ -158,6 +196,8 @@ enum SettingsURIHandler {
     /// Checks if a settings key is supported for URI manipulation.
     static func isValidSettingsKey(_ key: String) -> Bool {
         return supportedBooleanKeys.contains(key)
+            || doubleKeys.contains(key)
+            || enumKeys.contains(key)
     }
 
     /// Parses a boolean value from string.
@@ -171,12 +211,17 @@ enum SettingsURIHandler {
         return nil
     }
 
+    /// Parses a double value from string.
+    static func parseDouble(_ value: String) -> Double? {
+        return Double(value)
+    }
+
     // MARK: - Execution
 
     /// Handles thaw://set?key=X&value=Y&type=bool URL.
     /// Returns true if setting was changed successfully.
-    static func handleSet(key: String, value: String, sender: String?) -> Bool {
-        diagLog.debug("Settings URI: set request - key=\(key), value=\(value), sender=\(sender ?? "unknown")")
+    static func handleSet(key: String, value: String, sender: String?, displayUUID: String? = nil) -> Bool {
+        diagLog.debug("Settings URI: set request - key=\(key), value=\(value), sender=\(sender ?? "unknown"), display=\(displayUUID ?? "none")")
 
         // Validate key
         guard isValidSettingsKey(key) else {
@@ -184,7 +229,19 @@ enum SettingsURIHandler {
             return false
         }
 
-        // Parse value
+        // Check if this is a per-display setting
+        if perDisplayKeys.contains(key) {
+            return handlePerDisplaySet(key: key, value: value, displayUUID: displayUUID)
+        }
+
+        // Route to appropriate handler based on key type
+        if doubleKeys.contains(key) {
+            return handleDoubleSet(key: key, value: value)
+        } else if enumKeys.contains(key) {
+            return handleEnumSet(key: key, value: value)
+        }
+
+        // Parse boolean value
         guard let boolValue = parseBool(value) else {
             diagLog.warning("Settings URI: Invalid boolean value '\(value)'")
             return false
@@ -207,15 +264,169 @@ enum SettingsURIHandler {
         return true
     }
 
+    /// Handles setting a double/numeric value with range validation.
+    private static func handleDoubleSet(key: String, value: String) -> Bool {
+        guard let doubleValue = parseDouble(value) else {
+            diagLog.warning("Settings URI: Invalid double value '\(value)' for \(key)")
+            return false
+        }
+
+        // Validate and clamp to range
+        let (minVal, maxVal) = doubleRanges[key] ?? (0, Double.greatestFiniteMagnitude)
+        let clampedValue = Swift.max(minVal, Swift.min(doubleValue, maxVal))
+
+        if clampedValue != doubleValue {
+            diagLog.debug("Settings URI: Clamped \(key) from \(doubleValue) to \(clampedValue) (range: \(minVal)-\(maxVal))")
+        }
+
+        // Get the Defaults.Key
+        guard let defaultsKey = keyMapping[key] else {
+            diagLog.error("Settings URI: No mapping for key '\(key)'")
+            return false
+        }
+
+        // Apply the setting
+        Defaults.set(clampedValue, forKey: defaultsKey)
+
+        // Notify settings models that a value changed externally
+        postSettingsDidChangeNotification(key: key, doubleValue: clampedValue)
+
+        diagLog.info("Settings URI: Set \(key) = \(clampedValue)")
+
+        return true
+    }
+
+    /// Handles setting an enum value.
+    private static func handleEnumSet(key: String, value: String) -> Bool {
+        switch key {
+        case "rehideStrategy":
+            guard let strategy = RehideStrategy.fromString(value) else {
+                diagLog.warning("Settings URI: Invalid rehideStrategy value '\(value)'. Valid: smart (0), timed (1), focusedApp (2)")
+                return false
+            }
+
+            guard let defaultsKey = keyMapping[key] else {
+                diagLog.error("Settings URI: No mapping for key '\(key)'")
+                return false
+            }
+
+            Defaults.set(strategy.rawValue, forKey: defaultsKey)
+            postSettingsDidChangeNotification(key: key, rawEnumValue: strategy.rawValue)
+            diagLog.info("Settings URI: Set \(key) = \(strategy) (\(strategy.rawValue))")
+            return true
+
+        default:
+            return false
+        }
+    }
+
+    /// Handles setting a per-display configuration value.
+    /// useIceBar: affects active display only (or specific display if UUID provided)
+    /// iceBarLocation, alwaysShowHiddenItems: affects all displays with IceBar enabled (or specific display if UUID provided)
+    private static func handlePerDisplaySet(key: String, value: String, displayUUID: String?) -> Bool {
+        // If specific display UUID provided, use that
+        if let uuid = displayUUID, !uuid.isEmpty {
+            return handlePerDisplaySetForSpecificDisplay(key: key, value: value, displayUUID: uuid)
+        }
+
+        // Otherwise use default scope behavior
+        switch key {
+        case "useIceBar":
+            guard let boolValue = parseBool(value) else {
+                diagLog.warning("Settings URI: Invalid boolean value '\(value)' for useIceBar")
+                return false
+            }
+            // Post notification for DisplaySettingsManager to handle active display
+            postPerDisplaySettingsDidChangeNotification(key: key, value: boolValue, scope: .activeDisplay)
+            diagLog.info("Settings URI: Set useIceBar = \(boolValue) on active display")
+            return true
+
+        case "iceBarLocation":
+            // Parse IceBarLocation from string value
+            guard let location = IceBarLocation.fromString(value) else {
+                diagLog.warning("Settings URI: Invalid iceBarLocation value '\(value)'. Valid: dynamic, mousePointer, iceIcon (or 0, 1, 2)")
+                return false
+            }
+            // Post notification for DisplaySettingsManager to handle all enabled displays
+            // Use rawValue string for consistency
+            postPerDisplaySettingsDidChangeNotification(key: key, stringValue: String(location.rawValue), scope: .allEnabledDisplays)
+            diagLog.info("Settings URI: Set iceBarLocation = \(location) on all enabled displays")
+            return true
+
+        case "alwaysShowHiddenItems":
+            guard let boolValue = parseBool(value) else {
+                diagLog.warning("Settings URI: Invalid boolean value '\(value)' for alwaysShowHiddenItems")
+                return false
+            }
+            // Post notification for DisplaySettingsManager to handle all displays without IceBar
+            postPerDisplaySettingsDidChangeNotification(key: key, value: boolValue, scope: .allNonIceBarDisplays)
+            diagLog.info("Settings URI: Set alwaysShowHiddenItems = \(boolValue) on all non-IceBar displays")
+            return true
+
+        default:
+            return false
+        }
+    }
+
+    /// Handles setting a per-display configuration value for a specific display UUID.
+    private static func handlePerDisplaySetForSpecificDisplay(key: String, value: String, displayUUID: String) -> Bool {
+        // Validate UUID format (basic check: should contain dashes and not be empty)
+        guard displayUUID.contains("-") && !displayUUID.isEmpty else {
+            diagLog.warning("Settings URI: Invalid display UUID format '\(displayUUID)'")
+            return false
+        }
+
+        switch key {
+        case "useIceBar":
+            guard let boolValue = parseBool(value) else {
+                diagLog.warning("Settings URI: Invalid boolean value '\(value)' for useIceBar")
+                return false
+            }
+            // Post notification for specific display
+            postPerDisplaySettingsDidChangeNotification(key: key, value: boolValue, scope: .specificDisplay(uuid: displayUUID))
+            diagLog.info("Settings URI: Set useIceBar = \(boolValue) on display \(displayUUID)")
+            return true
+
+        case "iceBarLocation":
+            // Parse IceBarLocation from string value
+            guard let location = IceBarLocation.fromString(value) else {
+                diagLog.warning("Settings URI: Invalid iceBarLocation value '\(value)'. Valid: dynamic, mousePointer, iceIcon (or 0, 1, 2)")
+                return false
+            }
+            // Post notification for specific display
+            postPerDisplaySettingsDidChangeNotification(key: key, stringValue: String(location.rawValue), scope: .specificDisplay(uuid: displayUUID))
+            diagLog.info("Settings URI: Set iceBarLocation = \(location) on display \(displayUUID)")
+            return true
+
+        case "alwaysShowHiddenItems":
+            guard let boolValue = parseBool(value) else {
+                diagLog.warning("Settings URI: Invalid boolean value '\(value)' for alwaysShowHiddenItems")
+                return false
+            }
+            // Post notification for specific display
+            postPerDisplaySettingsDidChangeNotification(key: key, value: boolValue, scope: .specificDisplay(uuid: displayUUID))
+            diagLog.info("Settings URI: Set alwaysShowHiddenItems = \(boolValue) on display \(displayUUID)")
+            return true
+
+        default:
+            return false
+        }
+    }
+
     /// Handles thaw://toggle?key=X URL.
     /// Returns true if setting was toggled successfully.
-    static func handleToggle(key: String, sender: String?) -> Bool {
-        diagLog.debug("Settings URI: toggle request - key=\(key), sender=\(sender ?? "unknown")")
+    static func handleToggle(key: String, sender: String?, displayUUID: String? = nil) -> Bool {
+        diagLog.debug("Settings URI: toggle request - key=\(key), sender=\(sender ?? "unknown"), display=\(displayUUID ?? "none")")
 
         // Validate key
         guard isValidSettingsKey(key) else {
             diagLog.warning("Settings URI: Invalid key '\(key)'")
             return false
+        }
+
+        // Check if this is a per-display setting
+        if perDisplayKeys.contains(key) {
+            return handlePerDisplayToggle(key: key, displayUUID: displayUUID)
         }
 
         // Get the Defaults.Key
@@ -239,6 +450,58 @@ enum SettingsURIHandler {
         return true
     }
 
+    /// Handles toggling a per-display configuration value.
+    /// Currently only supports useIceBar and alwaysShowHiddenItems.
+    private static func handlePerDisplayToggle(key: String, displayUUID: String?) -> Bool {
+        // If specific display UUID provided, use that
+        if let uuid = displayUUID, !uuid.isEmpty {
+            // Validate UUID format
+            guard uuid.contains("-") && !uuid.isEmpty else {
+                diagLog.warning("Settings URI: Invalid display UUID format '\(uuid)'")
+                return false
+            }
+
+            switch key {
+            case "useIceBar":
+                // Post notification for DisplaySettingsManager to toggle specific display
+                postPerDisplaySettingsDidChangeNotification(key: key, toggle: true, scope: .specificDisplay(uuid: uuid))
+                diagLog.info("Settings URI: Toggled useIceBar on display \(uuid)")
+                return true
+
+            case "alwaysShowHiddenItems":
+                // Post notification for DisplaySettingsManager to toggle specific display
+                postPerDisplaySettingsDidChangeNotification(key: key, toggle: true, scope: .specificDisplay(uuid: uuid))
+                diagLog.info("Settings URI: Toggled alwaysShowHiddenItems on display \(uuid)")
+                return true
+
+            default:
+                // iceBarLocation doesn't support toggle
+                diagLog.warning("Settings URI: Toggle not supported for '\(key)'")
+                return false
+            }
+        }
+
+        // Default behavior without UUID
+        switch key {
+        case "useIceBar":
+            // Post notification for DisplaySettingsManager to toggle active display
+            postPerDisplaySettingsDidChangeNotification(key: key, toggle: true, scope: .activeDisplay)
+            diagLog.info("Settings URI: Toggled useIceBar on active display")
+            return true
+
+        case "alwaysShowHiddenItems":
+            // Post notification for DisplaySettingsManager to toggle on all non-IceBar displays
+            postPerDisplaySettingsDidChangeNotification(key: key, toggle: true, scope: .allNonIceBarDisplays)
+            diagLog.info("Settings URI: Toggled alwaysShowHiddenItems on all non-IceBar displays")
+            return true
+
+        default:
+            // iceBarLocation doesn't support toggle
+            diagLog.warning("Settings URI: Toggle not supported for '\(key)'")
+            return false
+        }
+    }
+
     /// Posts a notification that a setting was changed externally via Settings URI.
     private static func postSettingsDidChangeNotification(key: String, value: Bool) {
         NotificationCenter.default.post(
@@ -249,6 +512,85 @@ enum SettingsURIHandler {
                 "value": value,
             ]
         )
+    }
+
+    /// Posts a notification for double value settings.
+    private static func postSettingsDidChangeNotification(key: String, doubleValue: Double) {
+        NotificationCenter.default.post(
+            name: .settingsDidChangeViaURI,
+            object: nil,
+            userInfo: [
+                "key": key,
+                "doubleValue": doubleValue,
+            ]
+        )
+    }
+
+    /// Posts a notification for enum value settings.
+    private static func postSettingsDidChangeNotification(key: String, rawEnumValue: Int) {
+        NotificationCenter.default.post(
+            name: .settingsDidChangeViaURI,
+            object: nil,
+            userInfo: [
+                "key": key,
+                "rawEnumValue": rawEnumValue,
+            ]
+        )
+    }
+
+    /// Posts a notification for per-display settings changes.
+    private static func postPerDisplaySettingsDidChangeNotification(
+        key: String,
+        value: Bool? = nil,
+        stringValue: String? = nil,
+        toggle: Bool = false,
+        scope: PerDisplayScope
+    ) {
+        var userInfo: [String: Any] = [
+            "key": key,
+            "scope": scope.rawValue,
+        ]
+        if let value = value {
+            userInfo["value"] = value
+        }
+        if let stringValue = stringValue {
+            userInfo["stringValue"] = stringValue
+        }
+        if toggle {
+            userInfo["toggle"] = true
+        }
+
+        NotificationCenter.default.post(
+            name: .perDisplaySettingsDidChangeViaURI,
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
+    /// Scope for per-display setting application.
+    enum PerDisplayScope {
+        case activeDisplay
+        case allEnabledDisplays
+        case allNonIceBarDisplays
+        case specificDisplay(uuid: String)
+
+        /// String representation for notification userInfo
+        var rawValue: String {
+            switch self {
+            case .activeDisplay: return "active"
+            case .allEnabledDisplays: return "allEnabled"
+            case .allNonIceBarDisplays: return "allNonIceBar"
+            case let .specificDisplay(uuid): return "specific:\(uuid)"
+            }
+        }
+
+        /// Extract UUID if this is a specific display scope
+        var specificUUID: String? {
+            switch self {
+            case let .specificDisplay(uuid): return uuid
+            default: return nil
+            }
+        }
     }
 
     /// Returns the current whitelist as an array of bundle IDs.
@@ -267,4 +609,7 @@ enum SettingsURIHandler {
 extension Notification.Name {
     /// Posted when a setting is changed externally via Settings URI scheme.
     static let settingsDidChangeViaURI = Notification.Name("com.stonerl.Thaw.settingsDidChangeViaURI")
+
+    /// Posted when a per-display setting is changed externally via Settings URI scheme.
+    static let perDisplaySettingsDidChangeViaURI = Notification.Name("com.stonerl.Thaw.perDisplaySettingsDidChangeViaURI")
 }

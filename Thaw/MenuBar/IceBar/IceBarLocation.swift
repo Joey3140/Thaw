@@ -31,4 +31,20 @@ enum IceBarLocation: Int, CaseIterable, Codable, Identifiable {
         case .iceIcon: "\(Constants.displayName) icon"
         }
     }
+
+    /// Parses an IceBarLocation from a string value.
+    /// Supports exact case names: "dynamic", "mousePointer", "iceIcon"
+    /// Or raw integer values: "0", "1", "2"
+    static func fromString(_ value: String) -> IceBarLocation? {
+        switch value {
+        case "dynamic", "0":
+            return .dynamic
+        case "mousePointer", "1":
+            return .mousePointer
+        case "iceIcon", "2":
+            return .iceIcon
+        default:
+            return nil
+        }
+    }
 }

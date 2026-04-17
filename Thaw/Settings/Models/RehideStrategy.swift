@@ -29,4 +29,20 @@ enum RehideStrategy: Int, CaseIterable, Identifiable {
         case .focusedApp: "Focus"
         }
     }
+
+    /// Parses a RehideStrategy from a string value.
+    /// Supports exact case names: "smart", "timed", "focusedApp"
+    /// Or raw integer values: "0", "1", "2"
+    static func fromString(_ value: String) -> RehideStrategy? {
+        switch value {
+        case "smart", "0":
+            return .smart
+        case "timed", "1":
+            return .timed
+        case "focusedApp", "focused_app", "2":
+            return .focusedApp
+        default:
+            return nil
+        }
+    }
 }

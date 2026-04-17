@@ -276,39 +276,67 @@ final class GeneralSettings: ObservableObject {
 
     /// Handles settings changed externally via Settings URI scheme.
     private func handleExternalSettingsChange(_ notification: Notification) {
-        guard let key = notification.userInfo?["key"] as? String,
-              let value = notification.userInfo?["value"] as? Bool
-        else {
+        guard let key = notification.userInfo?["key"] as? String else {
             return
         }
 
-        diagLog.debug("GeneralSettings: Received external change for \(key) = \(value)")
+        // Handle boolean values
+        if let boolValue = notification.userInfo?["value"] as? Bool {
+            diagLog.debug("GeneralSettings: Received external change for \(key) = \(boolValue)")
 
-        // Update the corresponding @Published property without triggering the publisher
-        switch key {
-        case "showIceIcon":
-            showIceIcon = value
-        case "customIceIconIsTemplate":
-            customIceIconIsTemplate = value
-        case "useIceBar":
-            useIceBar = value
-        case "useIceBarOnlyOnNotchedDisplay":
-            useIceBarOnlyOnNotchedDisplay = value
-        case "iceBarLocationOnHotkey":
-            iceBarLocationOnHotkey = value
-        case "showOnClick":
-            showOnClick = value
-        case "showOnDoubleClick":
-            showOnDoubleClick = value
-        case "showOnHover":
-            showOnHover = value
-        case "showOnScroll":
-            showOnScroll = value
-        case "autoRehide":
-            autoRehide = value
-        default:
-            // Key not handled by GeneralSettings
-            break
+            switch key {
+            case "showIceIcon":
+                showIceIcon = boolValue
+            case "customIceIconIsTemplate":
+                customIceIconIsTemplate = boolValue
+            case "useIceBar":
+                useIceBar = boolValue
+            case "useIceBarOnlyOnNotchedDisplay":
+                useIceBarOnlyOnNotchedDisplay = boolValue
+            case "iceBarLocationOnHotkey":
+                iceBarLocationOnHotkey = boolValue
+            case "showOnClick":
+                showOnClick = boolValue
+            case "showOnDoubleClick":
+                showOnDoubleClick = boolValue
+            case "showOnHover":
+                showOnHover = boolValue
+            case "showOnScroll":
+                showOnScroll = boolValue
+            case "autoRehide":
+                autoRehide = boolValue
+            default:
+                // Key not handled by GeneralSettings
+                break
+            }
+        }
+
+        // Handle double values
+        if let doubleValue = notification.userInfo?["doubleValue"] as? Double {
+            diagLog.debug("GeneralSettings: Received external change for \(key) = \(doubleValue)")
+
+            switch key {
+            case "rehideInterval":
+                rehideInterval = doubleValue
+            default:
+                // Key not handled by GeneralSettings
+                break
+            }
+        }
+
+        // Handle enum values (raw integers)
+        if let rawEnumValue = notification.userInfo?["rawEnumValue"] as? Int {
+            diagLog.debug("GeneralSettings: Received external change for \(key) = \(rawEnumValue)")
+
+            switch key {
+            case "rehideStrategy":
+                if let strategy = RehideStrategy(rawValue: rawEnumValue) {
+                    rehideStrategy = strategy
+                }
+            default:
+                // Key not handled by GeneralSettings
+                break
+            }
         }
     }
 }

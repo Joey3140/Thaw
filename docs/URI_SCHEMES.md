@@ -122,6 +122,8 @@ Thaw supports programmatic settings manipulation via the `thaw://` URL scheme wi
 
 ### Supported Settings Keys
 
+#### Global Settings (All Displays)
+
 | Key                                       | Type | Description                                  |
 | ----------------------------------------- | ---- | -------------------------------------------- |
 | `autoRehide`                              | Bool | Auto-rehide hidden items after interval      |
@@ -129,7 +131,6 @@ Thaw supports programmatic settings manipulation via the `thaw://` URL scheme wi
 | `showOnDoubleClick`                       | Bool | Show hidden items on double-click            |
 | `showOnHover`                             | Bool | Show hidden items on hover                   |
 | `showOnScroll`                            | Bool | Show hidden items on scroll                  |
-| `useIceBar`                               | Bool | Enable the Thaw Bar (floating panel)         |
 | `useIceBarOnlyOnNotchedDisplay`           | Bool | Thaw Bar only on Macs with notch             |
 | `hideApplicationMenus`                    | Bool | Hide application menu titles                 |
 | `enableAlwaysHiddenSection`               | Bool | Enable the always-hidden section             |
@@ -139,6 +140,48 @@ Thaw supports programmatic settings manipulation via the `thaw://` URL scheme wi
 | `showMenuBarTooltips`                     | Bool | Show hover tooltips on menu bar items        |
 | `enableDiagnosticLogging`                 | Bool | Enable debug logging                         |
 | `customIceIconIsTemplate`                 | Bool | Custom icon renders as template              |
+| `showIceIcon`                             | Bool | Show the Thaw icon in menu bar               |
+| `iceBarLocationOnHotkey`                  | Bool | IceBar appears at mouse location on hotkey     |
+| `useLCSSortingOnNotchedDisplays`          | Bool | Use LCS sorting on notched displays          |
+
+#### Double/Time Interval Settings
+
+| Key                      | Type | Range | Description |
+| ------------------------ | ---- | ----- | ----------- |
+| `rehideInterval`         | Double | 1-300 seconds | Time before auto-rehide (default: 5) |
+| `showOnHoverDelay`       | Double | 0-5 seconds | Delay before hover reveals items (default: 0.1) |
+| `tooltipDelay`           | Double | 0-5 seconds | Delay before showing tooltips (default: 0) |
+| `iconRefreshInterval`    | Double | 0.1-5 seconds | Interval between icon refreshes (default: 0.5) |
+
+**Note:** Values outside the valid range are automatically clamped to the nearest boundary.
+
+#### Enum Settings
+
+| Key            | Type | Valid Values | Description |
+| -------------- | ---- | ------------ | ----------- |
+| `rehideStrategy` | String/Int | `smart` (0), `timed` (1), `focusedApp` (2) | Strategy for auto-rehiding items (default: smart) |
+
+#### Per-Display Settings
+
+These settings affect specific displays based on context:
+
+| Key                      | Type | Scope | Description |
+| ------------------------ | ---- | ----- | ----------- |
+| `useIceBar`              | Bool | Active display only | Enable/disable Thaw Bar on the display with the active menu bar |
+| `iceBarLocation`         | String | All displays with IceBar enabled | Thaw Bar position: `dynamic`, `mousePointer`, or `iceIcon` |
+| `alwaysShowHiddenItems`  | Bool | All displays without IceBar | Show hidden items inline when IceBar is disabled |
+
+**Per-Display Behavior:**
+
+By default:
+- `useIceBar`: Only affects the display with the currently active menu bar (where your cursor is)
+- `iceBarLocation`: Updates all displays that currently have the IceBar enabled
+- `alwaysShowHiddenItems`: Updates all displays that do NOT have the IceBar enabled
+
+With `display=<UUID>` parameter:
+- All per-display settings can target a specific display by its UUID
+- Overrides the default scope behavior
+- Fails silently if the specified display is not connected
 
 ### Settings URL Format
 
@@ -173,12 +216,46 @@ thaw://toggle?key=<setting>
 # Toggle auto-rehide (on → off, off → on)
 open "thaw://toggle?key=autoRehide"
 
-# Toggle Thaw Bar visibility
+# Toggle Thaw Bar visibility (active display only)
 open "thaw://toggle?key=useIceBar"
 
 # Toggle application menu hiding
 open "thaw://toggle?key=hideApplicationMenus"
+
+# Set IceBar location (all displays with IceBar enabled)
+open "thaw://set?key=iceBarLocation&value=mousePointer"
+
+# Enable always-show-hidden-items (all displays without IceBar)
+open "thaw://set?key=alwaysShowHiddenItems&value=true"
+
+# Set rehide interval to 10 seconds (clamped to range 1-300)
+open "thaw://set?key=rehideInterval&value=10"
+
+# Set hover delay to 0.5 seconds
+open "thaw://set?key=showOnHoverDelay&value=0.5"
+
+# Set rehide strategy to "timed" (0=smart, 1=timed, 2=focusedApp)
+open "thaw://set?key=rehideStrategy&value=timed"
+# Or using numeric value
+open "thaw://set?key=rehideStrategy&value=1"
 ```
+
+#### Target Specific Display (Per-Display Settings)
+
+Use the optional `display` parameter to target a specific display by UUID:
+
+```bash
+# Enable Thaw Bar on specific display by UUID
+open "thaw://set?key=useIceBar&value=true&display=37D8832A-2D66-02CA-B9F7-8F30A301B230"
+
+# Set IceBar location on specific display
+open "thaw://set?key=iceBarLocation&value=iceIcon&display=ABC12345-..."
+
+# Toggle Thaw Bar on specific display
+open "thaw://toggle?key=useIceBar&display=XYZ789-..."
+```
+
+**Note:** Display UUIDs can be found in System Settings → Displays, or via the `system_profiler SPDisplaysDataType` command. If the specified display is not connected, the request fails silently.
 
 #### Testing from Terminal (DEBUG Builds Only)
 

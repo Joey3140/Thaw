@@ -286,7 +286,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let success = SettingsURIHandler.handleSet(key: key, value: value, sender: sender)
+        // Extract optional display UUID parameter for per-display settings
+        let displayUUID = components.queryItems?.first(where: { $0.name == "display" })?.value
+
+        let success = SettingsURIHandler.handleSet(key: key, value: value, sender: sender, displayUUID: displayUUID)
         if !success {
             appState.diagLog.warning("Settings URI set: failed to set \(key) = \(value)")
         }
@@ -301,7 +304,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let success = SettingsURIHandler.handleToggle(key: key, sender: sender)
+        // Extract optional display UUID parameter for per-display settings
+        let displayUUID = components.queryItems?.first(where: { $0.name == "display" })?.value
+
+        let success = SettingsURIHandler.handleToggle(key: key, sender: sender, displayUUID: displayUUID)
         if !success {
             appState.diagLog.warning("Settings URI toggle: failed to toggle \(key)")
         }

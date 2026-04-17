@@ -81,7 +81,195 @@ final class DisplaySettingsManager: ObservableObject {
             }
             .store(in: &c)
 
+        // Listen for external per-display settings changes via Settings URI
+        NotificationCenter.default
+            .publisher(for: .perDisplaySettingsDidChangeViaURI)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                self?.handleExternalPerDisplaySettingsChange(notification)
+            }
+            .store(in: &c)
+
         cancellables = c
+    }
+
+    /// Handles per-display settings changed externally via Settings URI scheme.
+    private func handleExternalPerDisplaySettingsChange(_ notification: Notification) {
+        guard let key = notification.userInfo?["key"] as? String,
+              let scopeRaw = notification.userInfo?["scope"] as? String
+        else {
+            return
+        }
+
+        // Parse scope - it might be a simple scope or "specific:UUID"
+        let (scope, specificUUID) = parseScope(from: scopeRaw)
+
+        diagLog.debug("DisplaySettingsManager: Received external change for \(key) with scope \(scope)\(specificUUID.map { " (UUID: \($0))" } ?? "")")
+
+        switch key {
+        case "useIceBar":
+            if notification.userInfo?["toggle"] as? Bool == true {
+                // Toggle operation
+                if let uuid = specificUUID {
+                    toggleUseIceBar(forDisplayUUID: uuid)
+                } else {
+                    toggleIceBarForActiveDisplay()
+                }
+            } else if let value = notification.userInfo?["value"] as? Bool {
+                // Set operation
+                if let uuid = specificUUID {
+                    setUseIceBar(value, forDisplayUUID: uuid)
+                } else {
+                    setUseIceBar(value, forActiveDisplay: true)
+                }
+            }
+
+        case "iceBarLocation":
+            if let rawValueString = notification.userInfo?["stringValue"] as? String,
+               let rawValue = Int(rawValueString),
+               let location = IceBarLocation(rawValue: rawValue)
+            {
+                if let uuid = specificUUID {
+                    setIceBarLocation(location, forDisplayUUID: uuid)
+                } else {
+                    setIceBarLocation(location, scope: scope)
+                }
+            }
+
+        case "alwaysShowHiddenItems":
+            if notification.userInfo?["toggle"] as? Bool == true {
+                if let uuid = specificUUID {
+                    toggleAlwaysShowHiddenItems(forDisplayUUID: uuid)
+                } else {
+                    toggleAlwaysShowHiddenItems(scope: scope)
+                }
+            } else if let value = notification.userInfo?["value"] as? Bool {
+                if let uuid = specificUUID {
+                    setAlwaysShowHiddenItems(value, forDisplayUUID: uuid)
+                } else {
+                    setAlwaysShowHiddenItems(value, scope: scope)
+                }
+            }
+
+        default:
+            break
+        }
+    }
+
+    /// Parses scope string into scope enum and optional specific UUID.
+    /// Format: "active", "allEnabled", "allNonIceBar", or "specific:UUID"
+    private func parseScope(from scopeRaw: String) -> (SettingsURIHandler.PerDisplayScope, String?) {
+        if scopeRaw.hasPrefix("specific:") {
+            let uuid = String(scopeRaw.dropFirst("specific:".count))
+            return (.activeDisplay, uuid) // Use activeDisplay as placeholder, UUID determines actual target
+        }
+        switch scopeRaw {
+        case "active": return (.activeDisplay, nil)
+        case "allEnabled": return (.allEnabledDisplays, nil)
+        case "allNonIceBar": return (.allNonIceBarDisplays, nil)
+        default: return (.activeDisplay, nil)
+        }
+    }
+
+    /// Sets useIceBar for the active display.
+    private func setUseIceBar(_ value: Bool, forActiveDisplay: Bool) {
+        if forActiveDisplay {
+            guard let uuid = Bridging.getActiveMenuBarDisplayUUID() else {
+                diagLog.warning("Cannot set useIceBar — no active menu bar display UUID")
+                return
+            }
+            updateConfiguration(forDisplayUUID: uuid) { config in
+                config.withUseIceBar(value)
+            }
+        }
+    }
+
+    /// Sets useIceBar for a specific display UUID.
+    private func setUseIceBar(_ value: Bool, forDisplayUUID uuid: String) {
+        updateConfiguration(forDisplayUUID: uuid) { config in
+            config.withUseIceBar(value)
+        }
+    }
+
+    /// Toggles useIceBar for a specific display UUID.
+    private func toggleUseIceBar(forDisplayUUID uuid: String) {
+        let current = configurations[uuid] ?? .defaultConfiguration
+        updateConfiguration(forDisplayUUID: uuid) { config in
+            config.withUseIceBar(!current.useIceBar)
+        }
+    }
+
+    /// Sets iceBarLocation for displays based on scope.
+    private func setIceBarLocation(_ location: IceBarLocation, scope: SettingsURIHandler.PerDisplayScope) {
+        switch scope {
+        case .allEnabledDisplays:
+            // Update all displays that have IceBar enabled
+            for screen in NSScreen.screens {
+                guard let uuid = Bridging.getDisplayUUIDString(for: screen.displayID) else { continue }
+                let config = configurations[uuid] ?? .defaultConfiguration
+                if config.useIceBar {
+                    updateConfiguration(forDisplayUUID: uuid) { $0.withIceBarLocation(location) }
+                }
+            }
+        default:
+            diagLog.debug("setIceBarLocation not implemented for scope \(scope)")
+        }
+    }
+
+    /// Sets iceBarLocation for a specific display UUID.
+    private func setIceBarLocation(_ location: IceBarLocation, forDisplayUUID uuid: String) {
+        updateConfiguration(forDisplayUUID: uuid) { config in
+            config.withIceBarLocation(location)
+        }
+    }
+
+    /// Sets alwaysShowHiddenItems for displays based on scope.
+    private func setAlwaysShowHiddenItems(_ value: Bool, scope: SettingsURIHandler.PerDisplayScope) {
+        switch scope {
+        case .allNonIceBarDisplays:
+            // Update all displays that do NOT have IceBar enabled
+            for screen in NSScreen.screens {
+                guard let uuid = Bridging.getDisplayUUIDString(for: screen.displayID) else { continue }
+                let config = configurations[uuid] ?? .defaultConfiguration
+                if !config.useIceBar {
+                    updateConfiguration(forDisplayUUID: uuid) { $0.withAlwaysShowHiddenItems(value) }
+                }
+            }
+        default:
+            diagLog.debug("setAlwaysShowHiddenItems not implemented for scope \(scope)")
+        }
+    }
+
+    /// Toggles alwaysShowHiddenItems for displays based on scope.
+    private func toggleAlwaysShowHiddenItems(scope: SettingsURIHandler.PerDisplayScope) {
+        switch scope {
+        case .allNonIceBarDisplays:
+            // Toggle on all displays that do NOT have IceBar enabled
+            for screen in NSScreen.screens {
+                guard let uuid = Bridging.getDisplayUUIDString(for: screen.displayID) else { continue }
+                let config = configurations[uuid] ?? .defaultConfiguration
+                if !config.useIceBar {
+                    updateConfiguration(forDisplayUUID: uuid) { $0.withAlwaysShowHiddenItems(!$0.alwaysShowHiddenItems) }
+                }
+            }
+        default:
+            diagLog.debug("toggleAlwaysShowHiddenItems not implemented for scope \(scope)")
+        }
+    }
+
+    /// Sets alwaysShowHiddenItems for a specific display UUID.
+    private func setAlwaysShowHiddenItems(_ value: Bool, forDisplayUUID uuid: String) {
+        updateConfiguration(forDisplayUUID: uuid) { config in
+            config.withAlwaysShowHiddenItems(value)
+        }
+    }
+
+    /// Toggles alwaysShowHiddenItems for a specific display UUID.
+    private func toggleAlwaysShowHiddenItems(forDisplayUUID uuid: String) {
+        let current = configurations[uuid] ?? .defaultConfiguration
+        updateConfiguration(forDisplayUUID: uuid) { config in
+            config.withAlwaysShowHiddenItems(!current.alwaysShowHiddenItems)
+        }
     }
 
     // MARK: - Lookup
