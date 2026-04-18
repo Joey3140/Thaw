@@ -6,4 +6,9 @@ DerivedData/
 *.ipa
 *.dSYM
 .idea/
-.vscode/
+.vscode/.claude/.backups/
+.claude/.env-backups/
+.ai-codex/
+dashboard.html
+*.pre-harness
+*.pre-update
