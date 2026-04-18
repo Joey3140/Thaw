@@ -21,3 +21,9 @@ plans/
 # Local badge mockups
 .tmp-badge-preview/
 default.profraw
+.claude/.backups/
+.claude/.env-backups/
+.ai-codex/
+dashboard.html
+*.pre-harness
+*.pre-update
