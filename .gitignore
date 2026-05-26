@@ -20,7 +20,6 @@ dashboard.html
 .husky/
 .ai-codex/
 .harness-version
-harness-config.json
 codex-config.json
 dashboard.html
 *.pre-harness
@@ -41,3 +40,9 @@ project/sessions/
 project/sprints/
 project/tickets/
 # === End Harness-injected ===
+
+# Secrets — auto-added by Harness
+.env
+.env.*
+.env.local
+.env.*.local

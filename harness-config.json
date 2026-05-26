@@ -1,0 +1,97 @@
+{
+  "project": {
+    "name": "",
+    "techStack": [],
+    "testCommand": "npm test",
+    "lintCommand": "npm run lint",
+    "buildCommand": "npm run build",
+    "mainBranch": "main",
+    "devBranch": "development",
+    "description": "Personal fork/study of Thaw — menu-bar item hider for macOS."
+  },
+  "versioning": {
+    "files": [
+      "package.json"
+    ],
+    "changelog": "CHANGELOG.md",
+    "additionalSyncFiles": []
+  },
+  "tickets": {
+    "statuses": [
+      "BACKLOG",
+      "NOT_SPECCED",
+      "SPEC_READY",
+      "IN_PROGRESS",
+      "IN_REVIEW",
+      "NEEDS_HUMAN"
+    ],
+    "priorities": [
+      "P0",
+      "P1",
+      "P2",
+      "P3",
+      "P5"
+    ],
+    "releases": [],
+    "directory": "project/tickets"
+  },
+  "codex": {
+    "endpointDirs": [
+      "api/",
+      "src/routes/",
+      "routes/"
+    ],
+    "sharedDirs": [
+      "lib/",
+      "src/shared/",
+      "api/shared/"
+    ],
+    "pageDirs": [
+      "public/",
+      "src/pages/",
+      "pages/"
+    ],
+    "componentDirs": [
+      "src/components/",
+      "public/js/"
+    ],
+    "extensions": [
+      ".js",
+      ".ts",
+      ".jsx",
+      ".tsx"
+    ],
+    "endpointCategories": {},
+    "infraScripts": []
+  },
+  "hooks": {
+    "criticalMarkers": [],
+    "protectedFiles": [],
+    "memoryThresholds": {
+      "staleDays": 30,
+      "zeroRefDays": 14
+    },
+    "sizeRegression": {
+      "deletedLines": -50,
+      "addedLines": 500
+    }
+  },
+  "services": {
+    "vercel": {
+      "teamId": "",
+      "projectId": "",
+      "stagingUrl": "",
+      "productionUrl": ""
+    },
+    "sentry": {
+      "orgSlug": "",
+      "projectSlug": ""
+    },
+    "firebase": {
+      "projectId": ""
+    }
+  },
+  "dashboard": {
+    "port": 4000
+  }
+}
