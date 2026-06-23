@@ -210,7 +210,9 @@ final class MenuBarOverlayPanel: NSPanel {
             .store(in: &c)
 
         // Poll the mission control probe window to detect if it has moved/scaled.
-        Timer.publish(every: 0.1, on: .main, in: .common)
+        // 0.2s (5Hz) halves the perpetual main-thread CGS wakeup floor vs 0.1s
+        // while staying responsive enough to catch the Mission Control transition.
+        Timer.publish(every: 0.2, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }

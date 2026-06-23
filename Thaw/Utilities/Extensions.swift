@@ -638,6 +638,13 @@ extension NSScreen {
         )
     }
 
+    /// Serializes access to the per-display static caches below. They are read
+    /// on the main actor (e.g. the HID mouse-moved callback) and written from a
+    /// detached overlay-panel poll; without this lock, concurrent Swift
+    /// Dictionary mutation can corrupt the heap (EXC_BAD_ACCESS). The lock guards
+    /// only the dictionary touches — never the Window Server / Accessibility IPC.
+    private static let cacheLock = OSAllocatedUnfairLock()
+
     /// Per-display cache of the last known application menu frame.
     private static var applicationMenuFrameCache = [CGDirectDisplayID: CGRect]()
 
@@ -647,9 +654,11 @@ extension NSScreen {
     /// Invalidates the cached application menu frame when the frontmost app changes.
     private static func invalidateApplicationMenuFrameCacheIfNeeded() {
         let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        if currentPID != applicationMenuFrameCachePID {
-            applicationMenuFrameCache.removeAll()
-            applicationMenuFrameCachePID = currentPID
+        cacheLock.withLock {
+            if currentPID != applicationMenuFrameCachePID {
+                applicationMenuFrameCache.removeAll()
+                applicationMenuFrameCachePID = currentPID
+            }
         }
     }
 
@@ -658,15 +667,17 @@ extension NSScreen {
 
     /// Invalidates the cached menu bar heights.
     static func invalidateMenuBarHeightCache() {
-        menuBarHeightCache.removeAll()
+        cacheLock.withLock { menuBarHeightCache.removeAll() }
     }
 
     /// Removes cache entries for displays that are no longer connected.
     /// This prevents memory growth when displays are reconnected (which assigns new display IDs).
     static func cleanupDisconnectedDisplayCaches() {
         let connectedDisplayIDs = Set(NSScreen.screens.map { $0.displayID })
-        menuBarHeightCache = menuBarHeightCache.filter { connectedDisplayIDs.contains($0.key) }
-        applicationMenuFrameCache = applicationMenuFrameCache.filter { connectedDisplayIDs.contains($0.key) }
+        cacheLock.withLock {
+            menuBarHeightCache = menuBarHeightCache.filter { connectedDisplayIDs.contains($0.key) }
+            applicationMenuFrameCache = applicationMenuFrameCache.filter { connectedDisplayIDs.contains($0.key) }
+        }
     }
 
     /// Returns the height of the menu bar on this screen.
@@ -677,7 +688,7 @@ extension NSScreen {
     /// unavailable (e.g. during startup). The cache is cleared on display
     /// configuration changes via `invalidateMenuBarHeightCache()`.
     func getMenuBarHeight() -> CGFloat? {
-        if let cached = NSScreen.menuBarHeightCache[displayID] {
+        if let cached = NSScreen.cacheLock.withLock({ NSScreen.menuBarHeightCache[displayID] }) {
             // Negative sentinel means a previous lookup failed; don't retry
             // until the cache is invalidated.
             return cached > 0 ? cached : nil
@@ -685,10 +696,10 @@ extension NSScreen {
         let menuBarWindow = WindowInfo.menuBarWindow(for: displayID)
         guard let height = menuBarWindow?.bounds.height, height > 0 else {
             // Cache the failure so the next call skips the IPC round-trip.
-            NSScreen.menuBarHeightCache[displayID] = -1
+            NSScreen.cacheLock.withLock { NSScreen.menuBarHeightCache[displayID] = -1 }
             return nil
         }
-        NSScreen.menuBarHeightCache[displayID] = height
+        NSScreen.cacheLock.withLock { NSScreen.menuBarHeightCache[displayID] = height }
         return height
     }
 
@@ -703,7 +714,7 @@ extension NSScreen {
             return live
         }
         // Skip the sentinel (-1) stored for a failed lookup.
-        if let cached = NSScreen.menuBarHeightCache[displayID], cached > 0 {
+        if let cached = NSScreen.cacheLock.withLock({ NSScreen.menuBarHeightCache[displayID] }), cached > 0 {
             return cached
         }
         // Notched MacBooks have a ~37-38 pt menu bar; non-notch Macs use the
@@ -722,13 +733,13 @@ extension NSScreen {
     ///     at the notch. Use this for visual overlay calculations.
     func getApplicationMenuFrame(bypassCache: Bool = false, ignoreNotch: Bool = false) -> CGRect? {
         NSScreen.invalidateApplicationMenuFrameCacheIfNeeded()
-        if !bypassCache, let cached = NSScreen.applicationMenuFrameCache[displayID] {
+        if !bypassCache, let cached = NSScreen.cacheLock.withLock({ NSScreen.applicationMenuFrameCache[displayID] }) {
             return cached
         }
 
         let result = computeApplicationMenuFrame(ignoreNotch: ignoreNotch)
         if !bypassCache, let result {
-            NSScreen.applicationMenuFrameCache[displayID] = result
+            NSScreen.cacheLock.withLock { NSScreen.applicationMenuFrameCache[displayID] = result }
         }
         return result
     }

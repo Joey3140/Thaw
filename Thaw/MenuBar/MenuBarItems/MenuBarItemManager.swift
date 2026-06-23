@@ -1853,8 +1853,11 @@ extension MenuBarItemManager {
         do {
             try await eventSemaphore.wait(timeout: .seconds(5))
         } catch is SimpleSemaphore.TimeoutError {
-            MenuBarItemManager.diagLog.error("eventSemaphore timed out in postMoveEvents, forcing signal and retrying")
-            await eventSemaphore.signal()
+            // The timed-out wait already restored its own permit via the
+            // cancellation handler (cancelWaiter). Signalling again here would
+            // ratchet the permit ceiling up by one per timeout and permanently
+            // loosen serialization, so just abort this attempt.
+            MenuBarItemManager.diagLog.error("eventSemaphore timed out in postMoveEvents, aborting attempt")
             throw EventError.cannotComplete
         }
         defer { Task.detached { [eventSemaphore] in await eventSemaphore.signal() } }
@@ -2143,8 +2146,9 @@ extension MenuBarItemManager {
         do {
             try await eventSemaphore.wait(timeout: .seconds(5))
         } catch is SimpleSemaphore.TimeoutError {
-            MenuBarItemManager.diagLog.error("eventSemaphore timed out in postClickEvents for \(item.logString), forcing signal and retrying")
-            await eventSemaphore.signal()
+            // See postMoveEvents: cancelWaiter already restored the permit; a
+            // second signal here permanently ratchets the permit ceiling up.
+            MenuBarItemManager.diagLog.error("eventSemaphore timed out in postClickEvents for \(item.logString), aborting attempt")
             throw EventError.cannotComplete
         }
         defer { Task.detached { [eventSemaphore] in await eventSemaphore.signal() } }
