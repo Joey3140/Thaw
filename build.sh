@@ -37,6 +37,23 @@ xcodebuild \
 APP_PATH="$DERIVED/Build/Products/Release/$APP_NAME.app"
 [ -d "$APP_PATH" ] || { echo "ERROR: $APP_PATH not produced" >&2; exit 1; }
 echo "Built: $APP_PATH"
+
+# Sparkle ships a prebuilt Updater.app/Autoupdate inside its framework that
+# xcodebuild does not re-sign, so they keep Sparkle's own (team-less) signature.
+# Re-sign them with our Developer ID, inside-out, then re-seal the outer app so
+# the whole bundle is uniformly Dev ID signed (notarization-ready).
+while IFS= read -r nested; do
+    [ -e "$nested" ] || continue
+    echo "Re-signing nested: ${nested#"$APP_PATH"/}"
+    codesign --force --sign "$SIGN_ID" --options runtime --timestamp "$nested" 2>&1 | tail -1 || true
+done < <(find "$APP_PATH/Contents/Frameworks/Sparkle.framework" \
+    \( -name "Updater.app" -o -name "Autoupdate" -o -name "*.xpc" \) 2>/dev/null)
+# Re-seal the framework and the outer app over the new nested signatures.
+codesign --force --sign "$SIGN_ID" --options runtime --timestamp \
+    "$APP_PATH/Contents/Frameworks/Sparkle.framework" 2>&1 | tail -1 || true
+codesign --force --sign "$SIGN_ID" --options runtime --timestamp \
+    --identifier "$BUNDLE_ID" "$APP_PATH" 2>&1 | tail -1 || true
+
 codesign --verify --deep --strict "$APP_PATH" && echo "Signature: valid (deep/strict)"
 
 # Quit a running instance (if any) so the new binary takes over, then install.
