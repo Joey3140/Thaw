@@ -31,8 +31,11 @@ actor SimpleSemaphore {
             throw CancellationError()
         }
 
-        value -= 1
-        if value >= 0 {
+        // `value` is the count of AVAILABLE permits and never goes negative;
+        // contended waiters are tracked separately in `waiters`. Take a permit
+        // directly when one is free, otherwise queue.
+        if value > 0 {
+            value -= 1
             return
         }
 
@@ -42,6 +45,15 @@ actor SimpleSemaphore {
             try await withCheckedThrowingContinuation { continuation in
                 waiters.append(Waiter(id: id, continuation: continuation))
             }
+            // Resumed by signal(). If this task was cancelled (e.g. its
+            // wait(timeout:) already timed out) before being woken, the permit
+            // we were just handed is wasted — give it back so accounting stays
+            // balanced. This makes restoration idempotent: exactly one of
+            // signal()/cancelWaiter() accounts for each waiter, never both.
+            if Task.isCancelled {
+                signal()
+                throw CancellationError()
+            }
         } onCancel: { [weak self] in
             Task.detached { await self?.cancelWaiter(withID: id) }
         }
@@ -49,10 +61,12 @@ actor SimpleSemaphore {
 
     private func cancelWaiter(withID id: UUID) {
         guard let index = waiters.firstIndex(where: { $0.id == id }) else {
-            // The waiter was already consumed by signal() — don't touch the value.
+            // Already consumed by signal() — the give-back in wait() handles the
+            // permit, so there is nothing to restore here.
             return
         }
-        value += 1
+        // A queued waiter never decremented `value`, so cancelling it must not
+        // increment it; just remove it and resume with cancellation.
         let waiter = waiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
     }
