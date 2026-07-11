@@ -39,15 +39,35 @@ APP_PATH="$DERIVED/Build/Products/Release/$APP_NAME.app"
 echo "Built: $APP_PATH"
 
 # Sparkle ships a prebuilt Updater.app/Autoupdate inside its framework that
-# xcodebuild does not re-sign, so they keep Sparkle's own (team-less) signature.
-# Re-sign them with our Developer ID, inside-out, then re-seal the outer app so
-# the whole bundle is uniformly Dev ID signed (notarization-ready).
+# xcodebuild does not re-sign, so they keep Sparkle's own (ad-hoc, team-less)
+# signature. Re-sign them with our Developer ID, inside-out, then re-seal the
+# outer app so the whole bundle is uniformly Dev ID signed (notarization-ready).
+# NOTE: Sparkle's PREBUILT Downloader.xpc/Installer.xpc ship with *empty*
+# entitlements in their code signature (the App Sandbox entitlements in Sparkle's
+# source `.entitlements` only apply when building Sparkle from source, which we
+# don't). So there is no sandbox here to preserve; a plain re-sign is correct.
+# We deliberately do NOT inject app-sandbox onto these prebuilt binaries — doing
+# so on a binary not built for containerization would risk runtime failures.
 while IFS= read -r nested; do
     [ -e "$nested" ] || continue
     echo "Re-signing nested: ${nested#"$APP_PATH"/}"
     codesign --force --sign "$SIGN_ID" --options runtime --timestamp "$nested" 2>&1 | tail -1 || true
 done < <(find "$APP_PATH/Contents/Frameworks/Sparkle.framework" \
     \( -name "Updater.app" -o -name "Autoupdate" -o -name "*.xpc" \) 2>/dev/null)
+
+# Strip the debug `get-task-allow` entitlement that xcodebuild injects into the
+# embedded MenuBarItemService.xpc (the target has an empty CODE_SIGN_ENTITLEMENTS,
+# so base-entitlement injection stamps it). That helper holds Accessibility
+# privilege; a debuggable helper lets any same-user process task_for_pid() and
+# inject code into a TCC-trusted process. The service needs no entitlements, so
+# re-sign with NONE (no --entitlements, no --preserve-metadata) before the outer
+# re-seal folds it into the bundle signature.
+XPC_SERVICE="$APP_PATH/Contents/XPCServices/MenuBarItemService.xpc"
+if [ -d "$XPC_SERVICE" ]; then
+    echo "Re-signing (stripping get-task-allow): Contents/XPCServices/MenuBarItemService.xpc"
+    codesign --force --sign "$SIGN_ID" --options runtime --timestamp "$XPC_SERVICE" 2>&1 | tail -1 || true
+fi
+
 # Re-seal the framework and the outer app over the new nested signatures.
 codesign --force --sign "$SIGN_ID" --options runtime --timestamp \
     "$APP_PATH/Contents/Frameworks/Sparkle.framework" 2>&1 | tail -1 || true
@@ -55,6 +75,15 @@ codesign --force --sign "$SIGN_ID" --options runtime --timestamp \
     --identifier "$BUNDLE_ID" "$APP_PATH" 2>&1 | tail -1 || true
 
 codesign --verify --deep --strict "$APP_PATH" && echo "Signature: valid (deep/strict)"
+
+# Assert the Accessibility-privileged helper is not debuggable. codesign prints
+# the entitlements plist to stdout; grep for the dangerous key and fail the build
+# if it survived (regression guard for the injection above).
+if codesign -d --entitlements - "$XPC_SERVICE" 2>/dev/null | grep -q "get-task-allow"; then
+    echo "ERROR: MenuBarItemService.xpc still carries com.apple.security.get-task-allow" >&2
+    exit 1
+fi
+echo "Verified: XPC helper has no get-task-allow"
 
 # Quit a running instance (if any) so the new binary takes over, then install.
 # Don't auto-launch a non-running instance — Thaw is a menu-bar MANAGER; starting
