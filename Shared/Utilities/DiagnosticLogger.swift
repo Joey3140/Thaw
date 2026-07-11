@@ -299,53 +299,38 @@ struct DiagLog {
         self.category = category
     }
 
-    // Each level materializes the message only if a sink will consume it: the
-    // os_log subsystem is enabled for that type, or file logging is on. Without
-    // this gate the (often heavy) string interpolation runs on every call 24/7
-    // even in release with file logging off and debug/info filtered out.
+    // `DiagnosticLogger.shared.log` is a no-op when file logging is disabled, so
+    // the only cost when nothing consumes the message is building the string
+    // once. (Deferring that too would require os_log's escaping autoclosure,
+    // which forces explicit `self.` at every call site — tracked separately.)
 
     func debug(_ message: @autoclosure () -> String) {
-        let osEnabled = osLogger.isEnabled(type: .debug)
-        let fileEnabled = DiagnosticLogger.shared.isEnabled
-        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        if osEnabled { osLogger.debug("\(msg, privacy: .public)") }
-        if fileEnabled { DiagnosticLogger.shared.log(level: .debug, category: category, message: msg) }
+        osLogger.debug("\(msg, privacy: .public)")
+        DiagnosticLogger.shared.log(level: .debug, category: category, message: msg)
     }
 
     func info(_ message: @autoclosure () -> String) {
-        let osEnabled = osLogger.isEnabled(type: .info)
-        let fileEnabled = DiagnosticLogger.shared.isEnabled
-        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        if osEnabled { osLogger.info("\(msg, privacy: .public)") }
-        if fileEnabled { DiagnosticLogger.shared.log(level: .info, category: category, message: msg) }
+        osLogger.info("\(msg, privacy: .public)")
+        DiagnosticLogger.shared.log(level: .info, category: category, message: msg)
     }
 
     func notice(_ message: @autoclosure () -> String) {
-        let osEnabled = osLogger.isEnabled(type: .default)
-        let fileEnabled = DiagnosticLogger.shared.isEnabled
-        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        if osEnabled { osLogger.notice("\(msg, privacy: .public)") }
-        if fileEnabled { DiagnosticLogger.shared.log(level: .notice, category: category, message: msg) }
+        osLogger.notice("\(msg, privacy: .public)")
+        DiagnosticLogger.shared.log(level: .notice, category: category, message: msg)
     }
 
     func warning(_ message: @autoclosure () -> String) {
-        let osEnabled = osLogger.isEnabled(type: .error)
-        let fileEnabled = DiagnosticLogger.shared.isEnabled
-        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        if osEnabled { osLogger.warning("\(msg, privacy: .public)") }
-        if fileEnabled { DiagnosticLogger.shared.log(level: .warning, category: category, message: msg) }
+        osLogger.warning("\(msg, privacy: .public)")
+        DiagnosticLogger.shared.log(level: .warning, category: category, message: msg)
     }
 
     func error(_ message: @autoclosure () -> String) {
-        let osEnabled = osLogger.isEnabled(type: .error)
-        let fileEnabled = DiagnosticLogger.shared.isEnabled
-        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        if osEnabled { osLogger.error("\(msg, privacy: .public)") }
-        if fileEnabled { DiagnosticLogger.shared.log(level: .error, category: category, message: msg) }
+        osLogger.error("\(msg, privacy: .public)")
+        DiagnosticLogger.shared.log(level: .error, category: category, message: msg)
     }
 }
