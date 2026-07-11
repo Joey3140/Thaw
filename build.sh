@@ -7,6 +7,9 @@ BUNDLE_ID="com.stonerl.Thaw"
 SIGN_ID="Developer ID Application: Joseph Drury (4MMDJ2N969)"
 TEAM_ID="4MMDJ2N969"
 DERIVED="build"
+# notarytool keychain profile (team 4MMDJ2N969). Created once with
+# `xcrun notarytool store-credentials`; shared with the user's other apps.
+NOTARY_PROFILE="claudequota-notary"
 
 echo "Building $APP_NAME with Developer ID signing..."
 
@@ -84,6 +87,28 @@ if codesign -d --entitlements - "$XPC_SERVICE" 2>/dev/null | grep -q "get-task-a
     exit 1
 fi
 echo "Verified: XPC helper has no get-task-allow"
+
+# Notarize + staple. Beyond clearing the Gatekeeper "unidentified developer"
+# block on other Macs, a notarized + stapled build is what keeps TCC grants
+# (Accessibility / Screen Recording) attached across rebuilds — an un-notarized
+# rebuild changes the code identity enough that macOS treats the grant as stale
+# (shows ON in Settings but captures return transparent). Stapling writes the
+# ticket into the bundle without re-signing, so the install below carries it.
+# Set SKIP_NOTARIZE=1 for a fast local-iteration build you won't rely on TCC for.
+if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
+    echo "SKIP_NOTARIZE=1 — skipping notarization (TCC grants may go stale on this build)."
+else
+    echo "Notarizing with Apple (uploads + waits for verdict, ~1-5 min)..."
+    NOTARIZE_ZIP="$DERIVED/$APP_NAME-notarize.zip"
+    rm -f "$NOTARIZE_ZIP"
+    # notarytool needs an archive; ditto preserves the bundle + xattrs.
+    /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$NOTARIZE_ZIP"
+    xcrun notarytool submit "$NOTARIZE_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP_PATH"
+    rm -f "$NOTARIZE_ZIP"
+    spctl -a -vv "$APP_PATH" 2>&1 | grep -E "accepted|source=" || true
+    echo "Notarized + stapled."
+fi
 
 # Quit a running instance (if any) so the new binary takes over, then install.
 # Don't auto-launch a non-running instance — Thaw is a menu-bar MANAGER; starting
