@@ -154,6 +154,16 @@ final class MenuBarOverlayPanel: NSPanel {
     /// The origin of the probe window when it is at rest (not in Mission Control).
     private var probeAtRestOrigin: CGPoint?
 
+    /// True while the display is asleep or the screen is locked. The 5 Hz Mission
+    /// Control probe is a synchronous WindowServer round-trip on the main thread;
+    /// suspending it while dormant stops it from waking the CPU when nothing is
+    /// visible to overlay anyway.
+    private var isSystemDormant = false
+
+    /// The Mission Control probe subscription, held separately from
+    /// `cancellables` so it can be stopped and restarted around sleep/lock.
+    private var probeCancellable: AnyCancellable?
+
     /// Creates an overlay panel with the given app state and owning screen.
     init(appState: AppState, owningScreen: NSScreen) {
         self.appState = appState
@@ -210,32 +220,31 @@ final class MenuBarOverlayPanel: NSPanel {
             .store(in: &c)
 
         // Poll the mission control probe window to detect if it has moved/scaled.
-        // 0.2s (5Hz) halves the perpetual main-thread CGS wakeup floor vs 0.1s
-        // while staying responsive enough to catch the Mission Control transition.
-        Timer.publish(every: 0.2, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                guard let self else { return }
-                let windowID = CGWindowID(self.missionControlProbeWindow.windowNumber)
-                if let actualBounds = Bridging.getWindowBounds(for: windowID) {
-                    let actualOrigin = actualBounds.origin
+        // Armed here and suspended while the display sleeps / screen locks (see
+        // the dormancy observers below), so it doesn't wake the CPU when there is
+        // nothing to overlay.
+        startMissionControlProbe()
 
-                    // Capture the "at-rest" origin when we're reasonably sure we're not in Mission Control
-                    if self.probeAtRestOrigin == nil {
-                        self.probeAtRestOrigin = actualOrigin
-                        return
-                    }
-
-                    guard let atRest = self.probeAtRestOrigin else { return }
-
-                    let isActive = abs(actualOrigin.x - atRest.x) > 1.0 ||
-                        abs(actualOrigin.y - atRest.y) > 1.0
-
-                    if isActive != self.isMissionControlActive {
-                        self.isMissionControlActive = isActive
-                    }
-                }
-            }
+        // Suspend/resume the probe on display sleep and screen lock. Fail safe:
+        // any wake or unlock re-arms it, so it can never stay dead while visible.
+        let workspaceNC = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification] {
+            workspaceNC.publisher(for: name)
+                .sink { [weak self] _ in self?.setSystemDormant(true) }
+                .store(in: &c)
+        }
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
+            workspaceNC.publisher(for: name)
+                .sink { [weak self] _ in self?.setSystemDormant(false) }
+                .store(in: &c)
+        }
+        DistributedNotificationCenter.default()
+            .publisher(for: Notification.Name("com.apple.screenIsLocked"))
+            .sink { [weak self] _ in self?.setSystemDormant(true) }
+            .store(in: &c)
+        DistributedNotificationCenter.default()
+            .publisher(for: Notification.Name("com.apple.screenIsUnlocked"))
+            .sink { [weak self] _ in self?.setSystemDormant(false) }
             .store(in: &c)
 
         // Update when light/dark mode changes.
@@ -339,6 +348,7 @@ final class MenuBarOverlayPanel: NSPanel {
             .sink { [weak self] _ in
                 guard
                     let self,
+                    !self.isSystemDormant,
                     self.isOnActiveSpace,
                     let appState = self.appState,
                     !appState.appearanceManager.configuration.showsMenuBarBackground
@@ -352,7 +362,7 @@ final class MenuBarOverlayPanel: NSPanel {
         Timer.publish(every: 60, tolerance: 10, on: .main, in: .default)
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self, self.isOnActiveSpace else {
+                guard let self, !self.isSystemDormant, self.isOnActiveSpace else {
                     return
                 }
                 self.insertUpdateFlag(.applicationMenuFrame)
@@ -405,6 +415,55 @@ final class MenuBarOverlayPanel: NSPanel {
         }
 
         cancellables = c
+    }
+
+    /// Arms the 5 Hz Mission Control probe if it isn't already running.
+    private func startMissionControlProbe() {
+        guard probeCancellable == nil else { return }
+        probeCancellable = Timer.publish(every: 0.2, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let windowID = CGWindowID(self.missionControlProbeWindow.windowNumber)
+                if let actualBounds = Bridging.getWindowBounds(for: windowID) {
+                    let actualOrigin = actualBounds.origin
+
+                    // Capture the "at-rest" origin when we're reasonably sure we're not in Mission Control
+                    if self.probeAtRestOrigin == nil {
+                        self.probeAtRestOrigin = actualOrigin
+                        return
+                    }
+
+                    guard let atRest = self.probeAtRestOrigin else { return }
+
+                    let isActive = abs(actualOrigin.x - atRest.x) > 1.0 ||
+                        abs(actualOrigin.y - atRest.y) > 1.0
+
+                    if isActive != self.isMissionControlActive {
+                        self.isMissionControlActive = isActive
+                    }
+                }
+            }
+    }
+
+    /// Stops the Mission Control probe and forgets the at-rest baseline so it is
+    /// recaptured when the probe next starts (the probe window may have moved
+    /// while the display was asleep).
+    private func stopMissionControlProbe() {
+        probeCancellable?.cancel()
+        probeCancellable = nil
+        probeAtRestOrigin = nil
+    }
+
+    /// Suspends or resumes background polling around display sleep / screen lock.
+    private func setSystemDormant(_ dormant: Bool) {
+        guard dormant != isSystemDormant else { return }
+        isSystemDormant = dormant
+        if dormant {
+            stopMissionControlProbe()
+        } else {
+            startMissionControlProbe()
+        }
     }
 
     /// Inserts the given update flag into the panel's current list of update flags.
@@ -557,6 +616,8 @@ final class MenuBarOverlayPanel: NSPanel {
     override func close() {
         // Cancel all pending update tasks to prevent memory leaks
         updateTaskContext.cancelAllTasks()
+        // Stop the Mission Control probe (held outside `cancellables`).
+        stopMissionControlProbe()
         // Clear publishers to release references
         cancellables.removeAll()
         // Clear captured wallpaper image and other state

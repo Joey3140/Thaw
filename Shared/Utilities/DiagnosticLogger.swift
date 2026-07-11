@@ -109,6 +109,16 @@ final class DiagnosticLogger: @unchecked Sendable {
         qos: .utility
     )
 
+    /// Maximum size of a single log file before it is rotated. Without this, a
+    /// 24/7 session with logging enabled grows one file unbounded (the keep-5
+    /// cleanup only runs when a NEW file is opened, which never happens within a
+    /// single session otherwise).
+    private static let maxLogFileBytes = 10 * 1024 * 1024 // 10 MB
+
+    /// Bytes written to the current log file, used to decide when to rotate.
+    /// Mutated only on `writeQueue`.
+    private var bytesWrittenToCurrentFile = 0
+
     private init() {}
 
     // MARK: - File Management
@@ -131,8 +141,6 @@ final class DiagnosticLogger: @unchecked Sendable {
         do {
             let handle = try FileHandle(forWritingTo: fileURL)
             handle.seekToEndOfFile()
-            _fileHandle.withLock { $0 = handle }
-            _currentLogFile.withLock { $0 = fileURL }
 
             // Write header
             let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
@@ -145,9 +153,15 @@ final class DiagnosticLogger: @unchecked Sendable {
             macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
             ========================================\n\n
             """
-            if let data = header.data(using: .utf8) {
-                handle.write(data)
+            let headerData = header.data(using: .utf8)
+            // Install the handle and write the header atomically so a concurrent
+            // writeQueue log() can never interleave with the header.
+            _fileHandle.withLock { current in
+                current = handle
+                if let headerData { handle.write(headerData) }
             }
+            _currentLogFile.withLock { $0 = fileURL }
+            bytesWrittenToCurrentFile = headerData?.count ?? 0
 
             osLog.info("Diagnostic logging started: \(fileURL.path, privacy: .public)")
         } catch {
@@ -156,6 +170,26 @@ final class DiagnosticLogger: @unchecked Sendable {
 
         // Clean up old log files (keep last 5)
         cleanupOldLogFiles(in: dir, keepCount: 5)
+    }
+
+    /// Rotates to a fresh log file once the current one exceeds
+    /// ``maxLogFileBytes``. Must be called on `writeQueue` (it reads/writes
+    /// `bytesWrittenToCurrentFile` and the file handle without extra syncing
+    /// beyond the handle lock).
+    private func rotateLogFileIfNeeded() {
+        guard bytesWrittenToCurrentFile >= Self.maxLogFileBytes else { return }
+        let ts = timestampFormatter.string(from: Date())
+        _fileHandle.withLock { handle in
+            if let handle {
+                if let footer = "\n\(ts) [DiagnosticLogger] Log rotated (size limit reached)\n".data(using: .utf8) {
+                    handle.write(footer)
+                }
+                try? handle.close()
+            }
+            handle = nil
+        }
+        // Opening a new file resets the byte counter and triggers keep-5 cleanup.
+        openLogFile()
     }
 
     /// Closes the current log file.
@@ -233,9 +267,12 @@ final class DiagnosticLogger: @unchecked Sendable {
         guard let data = line.data(using: .utf8) else { return }
 
         writeQueue.async { [weak self] in
-            self?._fileHandle.withLock { handle in
+            guard let self else { return }
+            _fileHandle.withLock { handle in
                 handle?.write(data)
             }
+            bytesWrittenToCurrentFile += data.count
+            rotateLogFileIfNeeded()
         }
     }
 }
@@ -262,33 +299,53 @@ struct DiagLog {
         self.category = category
     }
 
+    // Each level materializes the message only if a sink will consume it: the
+    // os_log subsystem is enabled for that type, or file logging is on. Without
+    // this gate the (often heavy) string interpolation runs on every call 24/7
+    // even in release with file logging off and debug/info filtered out.
+
     func debug(_ message: @autoclosure () -> String) {
+        let osEnabled = osLogger.isEnabled(type: .debug)
+        let fileEnabled = DiagnosticLogger.shared.isEnabled
+        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        osLogger.debug("\(msg, privacy: .public)")
-        DiagnosticLogger.shared.log(level: .debug, category: category, message: msg)
+        if osEnabled { osLogger.debug("\(msg, privacy: .public)") }
+        if fileEnabled { DiagnosticLogger.shared.log(level: .debug, category: category, message: msg) }
     }
 
     func info(_ message: @autoclosure () -> String) {
+        let osEnabled = osLogger.isEnabled(type: .info)
+        let fileEnabled = DiagnosticLogger.shared.isEnabled
+        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        osLogger.info("\(msg, privacy: .public)")
-        DiagnosticLogger.shared.log(level: .info, category: category, message: msg)
+        if osEnabled { osLogger.info("\(msg, privacy: .public)") }
+        if fileEnabled { DiagnosticLogger.shared.log(level: .info, category: category, message: msg) }
     }
 
     func notice(_ message: @autoclosure () -> String) {
+        let osEnabled = osLogger.isEnabled(type: .default)
+        let fileEnabled = DiagnosticLogger.shared.isEnabled
+        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        osLogger.notice("\(msg, privacy: .public)")
-        DiagnosticLogger.shared.log(level: .notice, category: category, message: msg)
+        if osEnabled { osLogger.notice("\(msg, privacy: .public)") }
+        if fileEnabled { DiagnosticLogger.shared.log(level: .notice, category: category, message: msg) }
     }
 
     func warning(_ message: @autoclosure () -> String) {
+        let osEnabled = osLogger.isEnabled(type: .error)
+        let fileEnabled = DiagnosticLogger.shared.isEnabled
+        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        osLogger.warning("\(msg, privacy: .public)")
-        DiagnosticLogger.shared.log(level: .warning, category: category, message: msg)
+        if osEnabled { osLogger.warning("\(msg, privacy: .public)") }
+        if fileEnabled { DiagnosticLogger.shared.log(level: .warning, category: category, message: msg) }
     }
 
     func error(_ message: @autoclosure () -> String) {
+        let osEnabled = osLogger.isEnabled(type: .error)
+        let fileEnabled = DiagnosticLogger.shared.isEnabled
+        guard osEnabled || fileEnabled else { return }
         let msg = message()
-        osLogger.error("\(msg, privacy: .public)")
-        DiagnosticLogger.shared.log(level: .error, category: category, message: msg)
+        if osEnabled { osLogger.error("\(msg, privacy: .public)") }
+        if fileEnabled { DiagnosticLogger.shared.log(level: .error, category: category, message: msg) }
     }
 }

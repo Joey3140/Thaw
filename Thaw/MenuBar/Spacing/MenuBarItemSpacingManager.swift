@@ -55,8 +55,11 @@ final class MenuBarItemSpacingManager {
     {
         let process = Process()
 
-        process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = CollectionOfOne(command) + arguments
+        // Invoke the system binary by absolute path rather than resolving it
+        // through `/usr/bin/env` (a PATH lookup a same-user attacker could
+        // shadow). Only trusted system utilities like `defaults` are passed here.
+        process.executableURL = URL(filePath: "/usr/bin/\(command)")
+        process.arguments = arguments
 
         let task = Task.detached {
             try process.run()

@@ -368,7 +368,8 @@ final class MenuBarSearchPanel: NSPanel {
 
         let keyString = "\(Defaults.Key.menuBarSearchPanelFrameWithConfig.rawValue)\(uuidString)"
         UserDefaults.standard.set(relativeFrame.dictionaryRepresentation as NSDictionary, forKey: keyString)
-        UserDefaults.standard.synchronize()
+        // No synchronize(): it's deprecated and forces a blocking plist flush on
+        // the main thread; the system persists this automatically.
     }
 
     /// Loads the saved frame for a specific display.

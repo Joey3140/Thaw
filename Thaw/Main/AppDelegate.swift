@@ -93,26 +93,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    func applicationWillTerminate(_: Notification) {
+    func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
         appState.diagLog.info("Application will terminate - checking for blocked items to restore")
 
-        // Create a semaphore to wait for the async restore operation
-        let semaphore = DispatchSemaphore(value: 0)
-
+        // Restore items stuck at x=-1 (blocked state) before quitting, leaving
+        // normally hidden items in place. This is async @MainActor work whose
+        // event-posting depends on the main run loop continuing to pump the
+        // event taps, so we must NOT block the main thread waiting on it — doing
+        // so would deadlock the very main-actor task we're awaiting and stall the
+        // run loop the restore needs. Instead defer termination with
+        // `.terminateLater` and reply once the restore finishes (bounded to 5s).
         Task {
-            // Only restore items that are stuck at x=-1 (blocked state),
-            // leaving normally hidden items in place
-            _ = await appState.itemManager.restoreBlockedItemsToVisible()
-            semaphore.signal()
+            do {
+                try await Task(timeout: .seconds(5)) {
+                    _ = await self.appState.itemManager.restoreBlockedItemsToVisible()
+                }.value
+                appState.diagLog.info("Blocked item restore operation completed during app termination")
+            } catch {
+                appState.diagLog.warning("Blocked item restore operation timed out during app termination")
+            }
+            NSApp.reply(toApplicationShouldTerminate: true)
         }
 
-        // Wait up to 5 seconds for the restore to complete
-        let result = semaphore.wait(timeout: .now() + 5)
-        if result == .timedOut {
-            appState.diagLog.warning("Blocked item restore operation timed out during app termination")
-        } else {
-            appState.diagLog.info("Blocked item restore operation completed during app termination")
-        }
+        return .terminateLater
     }
 
     // MARK: Other Methods

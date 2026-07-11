@@ -10,11 +10,28 @@ import Cocoa
 import Combine
 import os.lock
 
-/// Simple actor-based semaphore to prevent overlapping operations
+/// Simple actor-based semaphore to prevent overlapping operations.
+///
+/// `value` is the number of AVAILABLE permits and is never negative; contended
+/// callers park in `waiters`. Each parked waiter is resolved **exactly once** —
+/// by a permit grant (`signal`), a timeout, or cancellation — and the resolution
+/// is decided atomically on the actor. This guarantees a permit is never handed
+/// to a waiter that has already given up (which would leak the permit and stall
+/// every future acquirer) and is never returned twice (which would inflate the
+/// permit ceiling and loosen serialization). Resolving through a per-waiter flag
+/// on the actor replaces the earlier task-group race, where a permit granted at
+/// the same instant the timeout fired could be silently discarded.
 actor SimpleSemaphore {
-    private struct Waiter {
-        let id: UUID
-        let continuation: CheckedContinuation<Void, Error>
+    /// An error that indicates the semaphore wait timed out.
+    struct TimeoutError: Error {}
+
+    /// A parked acquirer. Reference type so `signal`/`timeOutWaiter`/
+    /// `cancelWaiter` can identify and mutate the same instance by identity.
+    private final class Waiter {
+        var continuation: CheckedContinuation<Void, Error>?
+        /// Set the moment this waiter is granted, timed out, or cancelled.
+        /// Guards against resuming the continuation more than once.
+        var isResolved = false
     }
 
     private var value: Int
@@ -27,79 +44,83 @@ actor SimpleSemaphore {
 
     /// Waits for, or decrements, the semaphore, throwing on cancellation.
     func wait() async throws {
+        try await acquire(timeout: nil)
+    }
+
+    /// Waits for, or decrements, the semaphore with a timeout.
+    /// Throws ``CancellationError`` on cancellation or ``TimeoutError`` on timeout.
+    func wait(timeout: Duration) async throws {
+        try await acquire(timeout: timeout)
+    }
+
+    private func acquire(timeout: Duration?) async throws {
         if Task.isCancelled {
             throw CancellationError()
         }
 
-        // `value` is the count of AVAILABLE permits and never goes negative;
-        // contended waiters are tracked separately in `waiters`. Take a permit
-        // directly when one is free, otherwise queue.
+        // Fast path: take a free permit without parking.
         if value > 0 {
             value -= 1
             return
         }
 
-        let id = UUID()
+        let waiter = Waiter()
+        waiters.append(waiter)
+
+        // Arm the timeout, if any. `timeOutWaiter` runs on the actor, so its
+        // decision to time the waiter out is serialized against `signal`'s
+        // decision to grant it a permit — exactly one of them wins, and the
+        // loser is a no-op via `isResolved`.
+        let timeoutTask: Task<Void, Never>? = timeout.map { duration in
+            Task { [weak self] in
+                try? await Task.sleep(for: duration)
+                await self?.timeOutWaiter(waiter)
+            }
+        }
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                waiters.append(Waiter(id: id, continuation: continuation))
+                // Reached synchronously on the actor before any suspension, so
+                // no grant/timeout can have run yet; just record the resume.
+                waiter.continuation = continuation
             }
-            // Resumed by signal(). If this task was cancelled (e.g. its
-            // wait(timeout:) already timed out) before being woken, the permit
-            // we were just handed is wasted — give it back so accounting stays
-            // balanced. This makes restoration idempotent: exactly one of
-            // signal()/cancelWaiter() accounts for each waiter, never both.
-            if Task.isCancelled {
-                signal()
-                throw CancellationError()
-            }
-        } onCancel: { [weak self] in
-            Task.detached { await self?.cancelWaiter(withID: id) }
+            // Granted. Cancel the (now-irrelevant) timeout; it's a no-op if it
+            // already fired and resolved a different way.
+            timeoutTask?.cancel()
+        } onCancel: {
+            Task { await self.cancelWaiter(waiter) }
         }
     }
 
-    private func cancelWaiter(withID id: UUID) {
-        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
-            // Already consumed by signal() — the give-back in wait() handles the
-            // permit, so there is nothing to restore here.
+    /// Signals the semaphore, granting a permit to the oldest still-parked
+    /// waiter, or incrementing the available count if none are waiting.
+    func signal() {
+        while let waiter = waiters.first {
+            waiters.removeFirst()
+            // Skip waiters already resolved by a timeout/cancellation that
+            // hasn't yet removed itself (defensive — resolvers do remove).
+            if waiter.isResolved { continue }
+            waiter.isResolved = true
+            waiter.continuation?.resume()
             return
         }
-        // A queued waiter never decremented `value`, so cancelling it must not
-        // increment it; just remove it and resume with cancellation.
-        let waiter = waiters.remove(at: index)
-        waiter.continuation.resume(throwing: CancellationError())
+        value += 1
     }
 
-    /// An error that indicates the semaphore wait timed out.
-    struct TimeoutError: Error {}
-
-    /// Waits for, or decrements, the semaphore with a timeout.
-    /// Throws ``CancellationError`` on cancellation or
-    /// ``TimeoutError`` on timeout.
-    func wait(timeout: Duration) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try await self.wait()
-            }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw TimeoutError()
-            }
-            // The first task to finish (or throw) wins.
-            _ = try await group.next()
-            group.cancelAll()
-        }
+    /// Times the waiter out, if it hasn't already been granted or cancelled.
+    private func timeOutWaiter(_ waiter: Waiter) {
+        guard !waiter.isResolved else { return }
+        waiter.isResolved = true
+        waiters.removeAll { $0 === waiter }
+        waiter.continuation?.resume(throwing: TimeoutError())
     }
 
-    /// Signals the semaphore, resuming the next waiter if present.
-    func signal() {
-        if let waiter = waiters.first {
-            waiters.removeFirst()
-            waiter.continuation.resume(returning: ())
-        } else {
-            value += 1
-        }
+    /// Cancels the waiter, if it hasn't already been granted or timed out.
+    private func cancelWaiter(_ waiter: Waiter) {
+        guard !waiter.isResolved else { return }
+        waiter.isResolved = true
+        waiters.removeAll { $0 === waiter }
+        waiter.continuation?.resume(throwing: CancellationError())
     }
 }
 
@@ -145,9 +166,6 @@ final class MenuBarItemManager: ObservableObject {
     private var clickOperationTimeouts = [MenuBarItemTag: Duration]()
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
-
-    /// Timer for lightweight periodic cache checks.
-    private var cacheTickCancellable: AnyCancellable?
 
     /// Persisted identifiers of menu bar items we've already seen.
     private var knownItemIdentifiers = Set<String>()
@@ -1867,10 +1885,10 @@ extension MenuBarItemManager {
         do {
             try await eventSemaphore.wait(timeout: .seconds(5))
         } catch is SimpleSemaphore.TimeoutError {
-            // The timed-out wait already restored its own permit via the
-            // cancellation handler (cancelWaiter). Signalling again here would
-            // ratchet the permit ceiling up by one per timeout and permanently
-            // loosen serialization, so just abort this attempt.
+            // A timed-out wait never held a permit (the semaphore resolves the
+            // waiter as timed-out or grants it, never both), so there is nothing
+            // to release here — signalling would inflate the permit ceiling and
+            // loosen serialization. Just abort this attempt.
             MenuBarItemManager.diagLog.error("eventSemaphore timed out in postMoveEvents, aborting attempt")
             throw EventError.cannotComplete
         }
@@ -2160,8 +2178,8 @@ extension MenuBarItemManager {
         do {
             try await eventSemaphore.wait(timeout: .seconds(5))
         } catch is SimpleSemaphore.TimeoutError {
-            // See postMoveEvents: cancelWaiter already restored the permit; a
-            // second signal here permanently ratchets the permit ceiling up.
+            // See postMoveEvents: a timed-out wait never held a permit, so there
+            // is nothing to release; a signal here would inflate the ceiling.
             MenuBarItemManager.diagLog.error("eventSemaphore timed out in postClickEvents for \(item.logString), aborting attempt")
             throw EventError.cannotComplete
         }

@@ -26,8 +26,11 @@ final class StuckItemRecovery {
     /// Tracks items currently identified as stuck.
     private var stuckItems: [CGWindowID: StuckItemInfo] = [:]
 
-    /// Items we've successfully recovered.
-    private var recoveredItems: Set<CGWindowID> = []
+    /// Items we've successfully recovered, mapped to when they were recovered so
+    /// entries can expire (see ``recoveredItemMemoryDuration``). Storing the
+    /// timestamp — rather than a bare `Set` that only ever grew — bounds the map
+    /// and lets a window ID become eligible for re-recovery after the cooldown.
+    private var recoveredItems: [CGWindowID: Date] = [:]
 
     /// Maximum recovery attempts per item before giving up.
     private let maxRecoveryAttempts = 3
@@ -51,11 +54,10 @@ final class StuckItemRecovery {
         let now = Date()
         var newlyStuck: [MenuBarItem] = []
 
-        // Clear old recovered items
-        recoveredItems = recoveredItems.filter { _ in
-            // Keep items that were recovered recently
-            // (we filter based on when they were removed from stuckItems)
-            true // Simplified - in practice we'd track recovery time
+        // Forget items recovered longer ago than the memory duration, so the map
+        // stays bounded and a stale window ID no longer suppresses re-recovery.
+        recoveredItems = recoveredItems.filter { _, recoveredAt in
+            now.timeIntervalSince(recoveredAt) < recoveredItemMemoryDuration
         }
 
         for item in items where !item.isControlItem {
@@ -67,7 +69,7 @@ final class StuckItemRecovery {
                     // Already tracking - check if confirmed stuck
                     if now.timeIntervalSince(info.detectedAt) >= stuckConfirmationDelay,
                        info.recoveryAttempts < maxRecoveryAttempts,
-                       !recoveredItems.contains(item.windowID)
+                       recoveredItems[item.windowID] == nil
                     {
                         newlyStuck.append(item)
                         info.recoveryAttempts += 1
@@ -130,7 +132,7 @@ final class StuckItemRecovery {
                newBounds.origin.x != stuckXCoordinate
             {
                 stuckItems.removeValue(forKey: item.windowID)
-                recoveredItems.insert(item.windowID)
+                recoveredItems[item.windowID] = Date()
                 diagLog.info("Successfully recovered \(item.logString) to visible section")
                 return true
             } else {
@@ -146,7 +148,7 @@ final class StuckItemRecovery {
     /// Marks an item as successfully recovered.
     func markRecovered(_ item: MenuBarItem) {
         stuckItems.removeValue(forKey: item.windowID)
-        recoveredItems.insert(item.windowID)
+        recoveredItems[item.windowID] = Date()
     }
 
     /// Returns information about currently tracked stuck items.
@@ -166,8 +168,9 @@ final class StuckItemRecovery {
         diagLog.info("Reset stuck item recovery state")
     }
 
-    /// Checks if an item was recently recovered.
+    /// Checks if an item was recovered within ``recoveredItemMemoryDuration``.
     func wasRecentlyRecovered(_ item: MenuBarItem) -> Bool {
-        recoveredItems.contains(item.windowID)
+        guard let recoveredAt = recoveredItems[item.windowID] else { return false }
+        return Date().timeIntervalSince(recoveredAt) < recoveredItemMemoryDuration
     }
 }
