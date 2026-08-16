@@ -14,7 +14,12 @@ dashboard.html
 *.pre-update
 
 # === Harness-injected (private to local machine) ===
-.claude/
+# Harness ownership manifest is tracked; everything else in
+# .claude/ stays ignored. `.claude/*` rather than `.claude/`
+# because git will not descend into an excluded directory,
+# so a negation under `.claude/` has no effect.
+.claude/*
+!.claude/.harness-manifest
 .codex/
 .agents/
 .husky/
