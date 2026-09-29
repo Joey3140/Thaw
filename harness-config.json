@@ -1,10 +1,10 @@
 {
   "project": {
-    "name": "",
+    "name": "HiddenMenuBar",
     "techStack": [],
-    "testCommand": "npm test",
-    "lintCommand": "npm run lint",
-    "buildCommand": "npm run build",
+    "testCommand": "",
+    "lintCommand": "",
+    "buildCommand": "./build.sh",
     "mainBranch": "main",
     "devBranch": "development",
     "description": "Personal fork/study of Thaw — menu-bar item hider for macOS."
