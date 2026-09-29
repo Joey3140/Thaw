@@ -6,7 +6,7 @@ Inherits all global rules from `~/.claude/CLAUDE.md` and `~/Harness Projects/CLA
 
 ## Project MUST DO
 
-1. **Verify before committing** — this project has no unit-test suite yet — verify by building with the project's build script and exercising the change.
+1. **Verify before committing** — this project has no test suite yet; exercise the change the way this file describes (build script, live check, or manual run).
 
 ## Project MUST NOT
 
