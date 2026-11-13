@@ -268,7 +268,12 @@ final class MenuBarOverlayPanel: NSPanel, @unchecked Sendable {
         Timer.publish(every: 60, tolerance: 10, on: .main, in: .default)
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self else {
+                // Skip while the displays sleep or the screen is locked;
+                // the first tick after waking catches up.
+                guard
+                    let self,
+                    appState?.appearanceManager.missionControlDetector.isSystemDormant != true
+                else {
                     return
                 }
                 if isOnActiveSpace {

@@ -53,6 +53,12 @@ final class MissionControlDetector {
     /// Exposé is currently believed to be active.
     private(set) var isActive = false
 
+    /// A Boolean value that indicates whether the displays are asleep or the
+    /// screen is locked. Polling is paused then: each tick is a synchronous
+    /// window server round trip on the main thread, and nothing is on screen
+    /// to overlay.
+    private(set) var isSystemDormant = false
+
     /// nil when the detector is stopped.
     private var probeWindow: NSPanel?
 
@@ -100,8 +106,34 @@ final class MissionControlDetector {
         probeAtRestOrigin = nil
         missionControlDisplacedSince = nil
         lastStepUpSignal = nil
+        isSystemDormant = false
         if isActive {
             isActive = false
+        }
+    }
+
+    /// Pauses polling while the system is dormant and resumes it afterwards.
+    ///
+    /// Resuming is fail-safe: any wake or unlock re-arms the poll, so a
+    /// missed notification can't leave the probe stopped while the screen is
+    /// visible.
+    private func setSystemDormant(_ dormant: Bool) {
+        guard dormant != isSystemDormant else {
+            return
+        }
+        isSystemDormant = dormant
+        if dormant {
+            pollTask?.cancel()
+            pollTask = nil
+            // The probe can move while the displays sleep, so re-latch the
+            // baseline when polling resumes.
+            probeAtRestOrigin = nil
+            missionControlDisplacedSince = nil
+            if isActive {
+                isActive = false
+            }
+        } else if probeWindow != nil {
+            schedulePoll()
         }
     }
 
@@ -128,6 +160,31 @@ final class MissionControlDetector {
                 lastStepUpSignal = Date()
             }
             .store(in: &c)
+
+        // Pause on display sleep, system sleep and screen lock; resume on
+        // any wake or unlock.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        let distributedCenter = DistributedNotificationCenter.default()
+        Publishers.MergeMany(
+            workspaceCenter.publisher(for: NSWorkspace.screensDidSleepNotification),
+            workspaceCenter.publisher(for: NSWorkspace.willSleepNotification),
+            distributedCenter.publisher(for: Notification.Name("com.apple.screenIsLocked"))
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in
+            self?.setSystemDormant(true)
+        }
+        .store(in: &c)
+        Publishers.MergeMany(
+            workspaceCenter.publisher(for: NSWorkspace.screensDidWakeNotification),
+            workspaceCenter.publisher(for: NSWorkspace.didWakeNotification),
+            distributedCenter.publisher(for: Notification.Name("com.apple.screenIsUnlocked"))
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in
+            self?.setSystemDormant(false)
+        }
+        .store(in: &c)
 
         cancellables = c
     }
