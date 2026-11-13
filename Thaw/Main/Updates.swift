@@ -50,6 +50,14 @@ final class UpdatesManager: NSObject {
         String(localized: "Checking for updates is not supported in debug mode.")
     }
 
+    /// Whether this build has Sparkle switched off.
+    ///
+    /// The hiddenmenubar fork sets `ThawUpdatesDisabled` in Info.plist (and
+    /// ships no `SUFeedURL`) so that an upstream release, which lacks the
+    /// fork's patches, can never replace the installed build. The updater is
+    /// then never started and update checks are refused.
+    static let isUpdatingDisabled = Bundle.main.object(forInfoDictionaryKey: "ThawUpdatesDisabled") as? Bool ?? false
+
     /// The underlying updater controller.
     @ObservationIgnored
     private(set) lazy var updaterController = SPUStandardUpdaterController(
@@ -150,12 +158,18 @@ final class UpdatesManager: NSObject {
         // over Info.plist and silently redirect update checks; the delegate's
         // `feedURLString(for:)` already ignores it, this just scrubs the key.
         updater.clearFeedURLFromUserDefaults()
+        if Self.isUpdatingDisabled {
+            // Also clear the stored preferences an earlier build or the
+            // consent sheet may have switched on.
+            updater.automaticallyChecksForUpdates = false
+            updater.automaticallyDownloadsUpdates = false
+        }
         configureCancellables()
     }
 
     /// Starts the updater if it hasn't been started yet.
     func startUpdaterIfNeeded() {
-        guard !hasStartedUpdater else {
+        guard !hasStartedUpdater, !Self.isUpdatingDisabled else {
             return
         }
         hasStartedUpdater = true
@@ -187,6 +201,13 @@ final class UpdatesManager: NSObject {
             alert.messageText = debugUpdateMessage
             alert.runModal()
         #else
+            if Self.isUpdatingDisabled {
+                let alert = NSAlert()
+                alert.messageText = "Updates are turned off in this build"
+                alert.informativeText = "This is a patched build of Thaw. Sparkle is disabled so that an upstream release can't replace it. To update, rebuild from the hiddenmenubar branch with build.sh."
+                alert.runModal()
+                return
+            }
             guard let appState else {
                 return
             }
@@ -212,6 +233,13 @@ final class UpdatesManager: NSObject {
             updateChannel = .beta
             resolveCompatibilityCheckWithReleasesPage()
         #else
+            if Self.isUpdatingDisabled {
+                // No check can run, so answer the alert's promise with the
+                // releases page right away, as the debug build does.
+                updateChannel = .beta
+                resolveCompatibilityCheckWithReleasesPage()
+                return
+            }
             // Storing the channel schedules the check; asking again would open a
             // second session that Sparkle drops.
             startUpdaterIfNeeded()
