@@ -59,34 +59,53 @@ done < <(find "$APP_PATH/Contents/Frameworks/Sparkle.framework" \
     \( -name "Updater.app" -o -name "Autoupdate" -o -name "*.xpc" \) 2>/dev/null)
 
 # Strip the debug `get-task-allow` entitlement that xcodebuild injects into the
-# embedded MenuBarItemService.xpc (the target has an empty CODE_SIGN_ENTITLEMENTS,
-# so base-entitlement injection stamps it). That helper holds Accessibility
-# privilege; a debuggable helper lets any same-user process task_for_pid() and
-# inject code into a TCC-trusted process. The service needs no entitlements, so
-# re-sign with NONE (no --entitlements, no --preserve-metadata) before the outer
-# re-seal folds it into the bundle signature.
-XPC_SERVICE="$APP_PATH/Contents/XPCServices/MenuBarItemService.xpc"
-if [ -d "$XPC_SERVICE" ]; then
-    echo "Re-signing (stripping get-task-allow): Contents/XPCServices/MenuBarItemService.xpc"
-    codesign --force --sign "$SIGN_ID" --options runtime --timestamp "$XPC_SERVICE" 2>&1 | tail -1 || true
+# embedded XPC services (the targets have an empty CODE_SIGN_ENTITLEMENTS, so
+# base-entitlement injection stamps it). MenuBarItemService holds Accessibility
+# privilege and MenuBarCaptureService (added in 2.x) holds Screen Recording; a
+# debuggable helper lets any same-user process task_for_pid() and inject code
+# into a TCC-trusted process. Neither service needs entitlements (upstream's
+# notarized 2.1.0 ships both with an empty set), so re-sign with NONE (no
+# --entitlements, no --preserve-metadata) before the outer re-seal folds them
+# into the bundle signature.
+XPC_SERVICES=()
+for xpc in "$APP_PATH"/Contents/XPCServices/*.xpc; do
+    [ -d "$xpc" ] || continue
+    XPC_SERVICES+=("$xpc")
+    echo "Re-signing (stripping get-task-allow): ${xpc#"$APP_PATH"/}"
+    codesign --force --sign "$SIGN_ID" --options runtime --timestamp "$xpc" 2>&1 | tail -1 || true
+done
+[ "${#XPC_SERVICES[@]}" -gt 0 ] || { echo "ERROR: no XPC services found in $APP_PATH" >&2; exit 1; }
+
+# The outer app keeps whatever entitlements the project declares (2.1.0 has
+# com.apple.security.files.user-selected.read-only) minus get-task-allow, so a
+# re-seal can't silently drop an entitlement upstream adds later.
+APP_ENTITLEMENTS="$DERIVED/$APP_NAME.resign.entitlements"
+codesign -d --entitlements - --xml "$APP_PATH" > "$APP_ENTITLEMENTS" 2>/dev/null || true
+APP_ENTITLEMENT_ARGS=()
+if [ -s "$APP_ENTITLEMENTS" ]; then
+    /usr/libexec/PlistBuddy -c "Delete :com.apple.security.get-task-allow" "$APP_ENTITLEMENTS" >/dev/null 2>&1 || true
+    APP_ENTITLEMENT_ARGS=(--entitlements "$APP_ENTITLEMENTS")
 fi
 
 # Re-seal the framework and the outer app over the new nested signatures.
 codesign --force --sign "$SIGN_ID" --options runtime --timestamp \
     "$APP_PATH/Contents/Frameworks/Sparkle.framework" 2>&1 | tail -1 || true
 codesign --force --sign "$SIGN_ID" --options runtime --timestamp \
+    ${APP_ENTITLEMENT_ARGS[@]+"${APP_ENTITLEMENT_ARGS[@]}"} \
     --identifier "$BUNDLE_ID" "$APP_PATH" 2>&1 | tail -1 || true
 
 codesign --verify --deep --strict "$APP_PATH" && echo "Signature: valid (deep/strict)"
 
-# Assert the Accessibility-privileged helper is not debuggable. codesign prints
-# the entitlements plist to stdout; grep for the dangerous key and fail the build
-# if it survived (regression guard for the injection above).
-if codesign -d --entitlements - "$XPC_SERVICE" 2>/dev/null | grep -q "get-task-allow"; then
-    echo "ERROR: MenuBarItemService.xpc still carries com.apple.security.get-task-allow" >&2
-    exit 1
-fi
-echo "Verified: XPC helper has no get-task-allow"
+# Assert neither the app nor its privileged helpers are debuggable. codesign
+# prints the entitlements plist to stdout; grep for the dangerous key and fail
+# the build if it survived (regression guard for the injection above).
+for signed in "$APP_PATH" "${XPC_SERVICES[@]}"; do
+    if codesign -d --entitlements - "$signed" 2>/dev/null | grep -q "get-task-allow"; then
+        echo "ERROR: ${signed#"$DERIVED"/} still carries com.apple.security.get-task-allow" >&2
+        exit 1
+    fi
+done
+echo "Verified: app and XPC helpers have no get-task-allow"
 
 # Notarize + staple. Beyond clearing the Gatekeeper "unidentified developer"
 # block on other Macs, a notarized + stapled build is what keeps TCC grants
@@ -103,7 +122,12 @@ else
     rm -f "$NOTARIZE_ZIP"
     # notarytool needs an archive; ditto preserves the bundle + xattrs.
     /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$NOTARIZE_ZIP"
-    xcrun notarytool submit "$NOTARIZE_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+    if ! xcrun notarytool submit "$NOTARIZE_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait; then
+        echo "ERROR: notarization failed, so nothing was installed. A 401 means the app-specific" >&2
+        echo "password in keychain profile '$NOTARY_PROFILE' is no longer valid: make a new one at" >&2
+        echo "appleid.apple.com, then run: xcrun notarytool store-credentials $NOTARY_PROFILE --apple-id <id> --team-id $TEAM_ID" >&2
+        exit 1
+    fi
     xcrun stapler staple "$APP_PATH"
     rm -f "$NOTARIZE_ZIP"
     spctl -a -vv "$APP_PATH" 2>&1 | grep -E "accepted|source=" || true
