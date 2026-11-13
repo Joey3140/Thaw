@@ -66,3 +66,6 @@ project/tickets/
 .env.*
 .env.local
 .env.*.local
+
+# SwiftPM output of the root Package.swift (SourceKit-LSP indexing)
+/.build/
