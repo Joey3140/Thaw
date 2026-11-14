@@ -6,7 +6,7 @@ Inherits every rule in `~/.claude/CLAUDE.md` and `~/Harness Projects/CLAUDE.md`.
 
 ## Project MUST DO
 
-1. **Verify before committing** — this project has no test suite yet; exercise the change the way this file describes (build script, live check, or manual run).
+1. **Verify before committing** — no test command is configured (harness-config.json `testCommand` is blank); exercise the change the way this file describes (build script, live check, or manual run).
 
 ## Project PREFER
 
@@ -14,6 +14,12 @@ Inherits every rule in `~/.claude/CLAUDE.md` and `~/Harness Projects/CLAUDE.md`.
 2. **Structural/architectural changes** — suggest new rules and wait for review before restructuring.
 
 <!-- HARNESS:END -->
+
+
+## Tests (2.1.0)
+
+- Upstream 2.1.0 ships `ThawTests/` (Swift unit tests). They are deliberately NOT the harness test command (Joey, 2026-11-13): they touch the real Thaw settings and the live menu bar. Run them on purpose, with Thaw quit, when a change touches what they cover; `./build.sh` (notarize + install + relaunch) stays the verify step.
+- First launch of a new major version shows a "Welcome to Thaw" / Get Started screen, and the menu bar icon appears only after it (2.1.0 on 2026-11-13). If the icon is missing after an install, `open -a /Applications/Thaw.app` brings that window up.
 
 ---
 
