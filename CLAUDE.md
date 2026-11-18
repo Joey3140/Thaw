@@ -2,7 +2,7 @@
 
 <!-- HARNESS:BEGIN — managed by claude-harness, do not edit this block -->
 
-Inherits every rule in `~/.claude/CLAUDE.md` and `~/Harness Projects/CLAUDE.md`. Only project deltas go below; duplicating global rules makes maintenance lossy.
+Inherits every rule in `~/.claude/CLAUDE.md` and `~/claude-projects/CLAUDE.md`. Only project deltas go below; duplicating global rules makes maintenance lossy.
 
 ## Project MUST DO
 
